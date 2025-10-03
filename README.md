@@ -1,6 +1,4 @@
-# Kalinka Plugin Kalinka Plugin for Qobuz
-
-Qobuz plugin for Kalinka Music Player
+# Qobuz Plugin for Kalinka Music Player
 
 ## Overview
 
