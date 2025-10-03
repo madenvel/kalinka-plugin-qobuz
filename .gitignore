@@ -78,3 +78,7 @@ logs/
 venv/
 ENV/
 env/
+
+# Packaging
+dist/
+pkgroot/

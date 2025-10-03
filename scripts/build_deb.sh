@@ -20,13 +20,14 @@ if [ ! -f "src/kalinka_plugin_qobuz/_version.py" ]; then
     exit 1
 fi
 
-# Extract version from _version.py
-VERSION=$(python3 -c "
-import sys
-sys.path.insert(0, 'src')
-from kalinka_plugin_qobuz._version import __version__
-print(__version__)
-")
+# Extract version from the built wheel filename using sed
+WHEEL_PATH=$(ls dist/*.whl 2>/dev/null | head -1)
+if [ -z "$WHEEL_PATH" ] || [ ! -f "$WHEEL_PATH" ]; then
+    echo "Error: No wheel could be built." >&2
+    exit 1
+fi
+
+VERSION=$(basename "$WHEEL_PATH" | sed 's/kalinka_plugin_qobuz-\(.*\)-py3-none-any\.whl/\1/')
 
 PLUGIN_WHEEL="kalinka_plugin_qobuz-${VERSION}-py3-none-any.whl"
 
@@ -58,7 +59,7 @@ chmod 755 pkgroot/DEBIAN/postinst
 chmod 755 pkgroot/DEBIAN/prerm
 
 # Build the .deb package
-dpkg-deb --build pkgroot "${PLUGIN_SLUG}_${VERSION}_all.deb"
+dpkg-deb --root-owner-group --build pkgroot "${PLUGIN_SLUG}_${VERSION}_all.deb"
 
 echo "Package built: ${PLUGIN_SLUG}_${VERSION}_all.deb"
 ls -l "${PLUGIN_SLUG}_${VERSION}_all.deb"
