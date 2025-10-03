@@ -12,43 +12,6 @@ This is an experimental integration with [Qobuz](https://www.qobuz.com), allowin
 
 >**Disclaimer**: This plugin is an independent, community-developed integration and is not affiliated with, endorsed by, or supported by Qobuz or its parent companies. It is provided "as is", without any guarantees or warranties of any kind. Use of this plugin is entirely at your own risk. The author assumes no responsibility or liability for any consequences, including but not limited to potential violations of Qobuz's Terms of Service or any other issues arising from its use.
 
-## Key Components
-
-### 1. Configuration Model (`config_model.py`)
-Defines the configuration schema using Pydantic models that inherit from `ModuleConfig`:
-
-```python
-from pydantic import Field
-from kalinka_plugin_sdk.module_config import ModuleConfig
-
-class KalinkaPluginQobuzConfig(ModuleConfig):
-    name: str = Field(default="kalinka_plugin_qobuz", frozen=True, exclude=True)
-    enabled: bool = Field(default=False, title="Module Enabled")
-    # Add your plugin-specific configuration fields here
-```
-
-### 2. Module Setup (`module_setup.py`)
-The main entry point that Kalinka calls to initialize your plugin:
-
-```python
-from kalinka_plugin_sdk.api import PluginContext
-from kalinka_plugin_sdk.inputmodule import InputModule
-
-def setup(cfg: KalinkaPluginQobuzConfig, ctx: PluginContext) -> InputModule:
-    """Entry point used by Kalinka"""
-    ctx.logger.info("plugin_setup", plugin="kalinka_plugin_qobuz")
-    return KalinkaPluginQobuzInputModule(cfg)
-```
-### 3. Input Module Implementation (`kalinka_plugin_qobuz_input_module.py`)
-Implements the `InputModule` interface with all required methods for music streaming functionality:
-
-- `search()` - Search for tracks, albums, artists
-- `browse()` - Browse music catalogs
-- `get_track_info()` - Get detailed track information
-- `list_favorite()` - List user favorites
-- `playlist_*()` - Playlist management methods
-- `get_resource_path()` - Get cover art resource URLs
-
 ## Building
 
 ### Prerequisites
