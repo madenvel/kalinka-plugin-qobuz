@@ -16,10 +16,10 @@ class QobuzConfig(ModuleConfig):
     model_config = ConfigDict(use_enum_values=True)
 
     name: str = Field(default="qobuz", title="Qobuz", frozen=True, exclude=True)
-    email: str = Field(default="my@email.com", title="Qobuz login")
-    password_hash: str = Field(
+    user_auth_token: str = Field(
         default="",
-        title="Qobuz password",
+        title="User auth token",
+        description="Obtain from play.qobuz.com → DevTools → Application → Local Storage → user_auth_token",
         json_schema_extra={"password": True},
     )
     format: QobuzAudioFormat = Field(

@@ -158,8 +158,8 @@ class LastUpdate(BaseModel):
 
 
 class QobuzClient:
-    def __init__(self, email, pwd, app_id, secrets):
-        logger.info(f"Logging...")
+    def __init__(self, app_id, secrets, user_auth_token):
+        logger.info("Logging...")
         self.secrets = secrets
         self.id = str(app_id)
         self.session = httpx.Client(
@@ -179,35 +179,38 @@ class QobuzClient:
         self.sec = None
         # a short living cache to be used for reporting purposes
         self.track_url_response_cache = {}
-        self.auth(email, pwd)
+        self.login_with_token(user_auth_token)
         self.cfg_setup()
 
         self.last_update = LastUpdate()
         self.cached = {"albums": {}, "artists": {}, "tracks": {}, "playlists": {}}
 
-    def auth(self, email, pwd):
-        params = {
-            "email": email,
-            "password": pwd,
-            "app_id": self.id,
-        }
-        r = self.session.get(self.base + "user/login", params=params)
+    def login_with_token(self, token):
+        if not token:
+            raise AuthenticationError(
+                "User auth token is required. Obtain it from play.qobuz.com: "
+                "DevTools → Application → Local Storage → user_auth_token"
+            )
+        self.session.headers.update({"X-User-Auth-Token": token})
+        r = self.session.post(
+            self.base + "user/login",
+            content=b"extra=partner",
+            headers={"Content-Type": "text/plain;charset=UTF-8"},
+        )
         if r.status_code == 401:
-            raise AuthenticationError("Invalid credentials.")
+            raise AuthenticationError("Invalid or expired token.")
         elif r.status_code == 400:
             raise InvalidAppIdError("Invalid app id.")
-        else:
-            logger.info("Logged: OK")
 
         r.raise_for_status()
         usr_info = r.json()
 
         if not usr_info["user"]["credential"]["parameters"]:
             raise IneligibleError("Free accounts are not eligible to play tracks.")
-        self.uat = usr_info["user_auth_token"]
+        self.uat = usr_info.get("user_auth_token", token)
         self.session.headers.update({"X-User-Auth-Token": self.uat})
         self.label = usr_info["user"]["credential"]["parameters"]["short_label"]
-        logger.info(f"Membership: {self.label}")
+        logger.info(f"Logged in. Membership: {self.label}")
         self.credential_id = usr_info["user"]["credential"]["id"]
         self.user_id = usr_info["user"]["id"]
 
@@ -356,14 +359,10 @@ class QobuzClient:
 
 
 def get_client(config: QobuzConfig) -> QobuzClient:
-    email = config.email
-    password = config.password_hash
     bundle = Bundle()
-
     app_id = bundle.get_app_id()
     secrets = [secret for secret in bundle.get_secrets().values() if secret]
-    client = QobuzClient(email, password, app_id, secrets)
-    return client
+    return QobuzClient(app_id, secrets, config.user_auth_token)
 
 
 def qobuz_link_retriever(qobuz_client, id, format_id) -> TrackUrl:

@@ -22,6 +22,7 @@ _APP_ID_REGEX = re.compile(
 _APP_SECRET_FALLBACK_REGEX = re.compile(
     r'appSecret:"(?P<secret>[0-9a-f]{32})"'
 )
+_PRIVATE_KEY_REGEX = re.compile(r'privateKey:"(?P<private_key>[^"]+)"')
 
 _BASE_URL = "https://play.qobuz.com"
 _BUNDLE_URL_REGEX = re.compile(
@@ -49,6 +50,10 @@ class Bundle:
 
         self._bundle = response.text
         self._session.close()
+
+    def get_private_key(self):
+        match = _PRIVATE_KEY_REGEX.search(self._bundle)
+        return match.group("private_key") if match else None
 
     def get_app_id(self):
         match = _APP_ID_REGEX.search(self._bundle)
