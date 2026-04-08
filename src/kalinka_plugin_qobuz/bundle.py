@@ -17,16 +17,15 @@ _SEED_TIMEZONE_REGEX = re.compile(
 )
 _INFO_EXTRAS_REGEX = r'name:"\w+/(?P<timezone>{timezones})",info:"(?P<info>[\w=]+)",extras:"(?P<extras>[\w=]+)"'
 _APP_ID_REGEX = re.compile(
-    r'production:{api:{appId:"(?P<app_id>\d{9})",appSecret:"\w{32}"'
+    r'production:{api:{appId:"(?P<app_id>\d{9})"'
 )
-
-_BUNDLE_URL_REGEX = re.compile(
-    r'<script src="(/resources/\d+\.\d+\.\d+-[a-z]\d{3}/bundle\.js)"></script>'
+_APP_SECRET_FALLBACK_REGEX = re.compile(
+    r'appSecret:"(?P<secret>[0-9a-f]{32})"'
 )
 
 _BASE_URL = "https://play.qobuz.com"
 _BUNDLE_URL_REGEX = re.compile(
-    r'<script src="(/resources/\d+\.\d+\.\d+-[a-z]\d{3}/bundle\.js)"></script>'
+    r'<script src="(/resources/[\w.\-]+/bundle\.js)"></script>'
 )
 
 
@@ -40,7 +39,7 @@ class Bundle:
 
         bundle_url_match = _BUNDLE_URL_REGEX.search(response.text)
         if not bundle_url_match:
-            raise NotImplementedError("Bundle URL found")
+            raise NotImplementedError("Bundle URL not found")
 
         bundle_url = bundle_url_match.group(1)
 
@@ -68,16 +67,27 @@ class Bundle:
             secrets[timezone] = [seed]
 
         keypairs = list(secrets.items())
-        secrets.move_to_end(keypairs[1][0], last=False)
-        info_extras_regex = _INFO_EXTRAS_REGEX.format(
-            timezones="|".join([timezone.capitalize() for timezone in secrets])
-        )
-        info_extras_matches = re.finditer(info_extras_regex, self._bundle)
-        for match in info_extras_matches:
-            timezone, info, extras = match.group("timezone", "info", "extras")
-            secrets[timezone.lower()] += [info, extras]
-        for secret_pair in secrets:
-            secrets[secret_pair] = base64.standard_b64decode(
-                "".join(secrets[secret_pair])[:-44]
-            ).decode("utf-8")
+        if len(keypairs) >= 2:
+            secrets.move_to_end(keypairs[1][0], last=False)
+
+        if secrets:
+            info_extras_regex = _INFO_EXTRAS_REGEX.format(
+                timezones="|".join([timezone.capitalize() for timezone in secrets])
+            )
+            info_extras_matches = re.finditer(info_extras_regex, self._bundle)
+            for match in info_extras_matches:
+                timezone, info, extras = match.group("timezone", "info", "extras")
+                secrets[timezone.lower()] += [info, extras]
+            for secret_pair in secrets:
+                secrets[secret_pair] = base64.standard_b64decode(
+                    "".join(secrets[secret_pair])[:-44]
+                ).decode("utf-8")
+
+        if not any(secrets.values()):
+            logger.warning("Primary secret extraction failed, trying fallback")
+            fallback_secrets = OrderedDict()
+            for i, match in enumerate(_APP_SECRET_FALLBACK_REGEX.finditer(self._bundle)):
+                fallback_secrets[f"fallback_{i}"] = match.group("secret")
+            return fallback_secrets
+
         return secrets
