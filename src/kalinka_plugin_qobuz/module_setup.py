@@ -1,17 +1,23 @@
+import asyncio
+import logging
 from typing import Optional
-from kalinka_plugin_sdk.api import (
-    EventListenerAPI,
-    InputModulePlugin,
-    PlayQueueAPI,
-    PluginContext,
+from kalinka_plugin_sdk import (
+    PlayQueueEventType,
+    PlaybackStateChangedEvent,
+    RequestMoreTracksEvent,
+    TracksAddedEvent,
+    TracksRemovedEvent,
 )
-from kalinka_plugin_sdk.events import EventType
+from kalinka_plugin_sdk.plugin import InputPluginContext, InputModulePlugin
+from kalinka_plugin_sdk.events import PlayQueueEventType
 from kalinka_plugin_sdk.inputmodule import InputModule
 
 from .config_model import QobuzConfig
 from .qobuz_autoplay import QobuzAutoplay
 from .qobuz_reporter import QobuzReporter
 from .qobuz import QobuzInputModule, get_client
+
+logger = logging.getLogger(__name__.split(".")[-1])
 
 
 class KalinkaPluginQobuz(InputModulePlugin):
@@ -24,7 +30,8 @@ class KalinkaPluginQobuz(InputModulePlugin):
         self.reporter_subscriptions = []
         self.autoplay = None
         self.reporter = None
-        self.interface = None
+        self.interface: Optional[InputModule] = None
+        self._qobuz_tasks = None
 
     def module_name(self) -> str:
         return "Qobuz Input Module"
@@ -32,70 +39,67 @@ class KalinkaPluginQobuz(InputModulePlugin):
     def get_interface(self) -> Optional[InputModule]:
         return self.interface
 
-    def _setup_autoplay(
+    async def _setup_jobs(
         self,
         client,
-        playqueue: PlayQueueAPI,
-        track_browser: InputModule,
-        event_listener: EventListenerAPI,
+        context: InputPluginContext,
     ):
-        self.autoplay = QobuzAutoplay(client, playqueue, track_browser)
-        self.autoplay_subscriptions.append(
-            event_listener.subscribe(
-                EventType.RequestMoreTracks, self.autoplay.add_recommendation
-            )
-        )
-        self.autoplay_subscriptions.append(
-            event_listener.subscribe(EventType.TracksAdded, self.autoplay.add_tracks)
-        )
-        self.autoplay_subscriptions.append(
-            event_listener.subscribe(
-                EventType.TracksRemoved, self.autoplay.remove_tracks
-            )
-        )
+        if self.interface is None:
+            return
 
-    def _setup_reporter(
-        self,
-        client,
-        event_listener: EventListenerAPI,
-    ):
-
+        autoplay = QobuzAutoplay(
+            qobuz_client=client,
+            playqueue=context.playqueue,
+            track_browser=self.interface,
+        )
         self.reporter = QobuzReporter(client)
-        self.reporter_subscriptions.append(
-            event_listener.subscribe(
-                EventType.StateChanged, self.reporter.on_state_changed
-            )
-        )
 
-    def setup(
+        try:
+            async with context.listener.stream(
+                [
+                    PlayQueueEventType.RequestMoreTracks,
+                    PlayQueueEventType.TracksAdded,
+                    PlayQueueEventType.TracksRemoved,
+                    PlayQueueEventType.PlaybackStateChanged,
+                ]
+            ) as stream:  # pyright: ignore[reportGeneralTypeIssues]
+                async for item in stream:
+                    if isinstance(item, RequestMoreTracksEvent):
+                        await autoplay.add_recommendation(item)
+                    elif isinstance(item, TracksAddedEvent):
+                        autoplay.add_tracks(item)
+                    elif isinstance(item, TracksRemovedEvent):
+                        autoplay.remove_tracks(item)
+                    elif isinstance(item, PlaybackStateChangedEvent):
+                        self.reporter.on_state_changed(item)
+
+        except asyncio.CancelledError:
+            logger.info("Playback state listener cancelled")
+            if self.reporter:
+                await self.reporter.shutdown()
+            return
+        except Exception as e:
+            logger.error(f"Error in playback state listener: {e}")
+            raise
+
+        logger.info("Playback state listener stopped")
+
+    async def setup(
         self,
-        context: PluginContext,
+        context: InputPluginContext,
     ) -> None:
         config = QobuzConfig(**context.config.model_dump())
-        client = get_client(config)
-        self.interface = QobuzInputModule(config, client, context.event_emitter)
-        self._setup_autoplay(
-            client, context.playqueue, self.interface, context.listener
-        )
-        self._setup_reporter(client, context.listener)
+        client = await get_client(config)
+        self.interface = QobuzInputModule(config, client)
+        self._qobuz_tasks = asyncio.create_task(self._setup_jobs(client, context))
 
-    def shutdown(self):
+    async def shutdown(self):
+        if self._qobuz_tasks:
+            self._qobuz_tasks.cancel()
+            try:
+                await self._qobuz_tasks
+            except asyncio.CancelledError:
+                pass
 
-        # Unsubscribe from all autoplay event subscriptions
-        for subscription in self.autoplay_subscriptions:
-            subscription.unsubscribe()
-        self.autoplay_subscriptions.clear()
-
-        # Unsubscribe from all reporter event subscriptions
-        for subscription in self.reporter_subscriptions:
-            subscription.unsubscribe()
-        self.reporter_subscriptions.clear()
-
-        # Clean up the QobuzReporter using its shutdown method
-        if self.reporter is not None:
-            self.reporter.shutdown()
-            self.reporter = None
-
-        # Clean up the QobuzAutoplay module
-        if self.autoplay is not None:
-            self.autoplay = None
+        if self.reporter:
+            await self.reporter.shutdown()

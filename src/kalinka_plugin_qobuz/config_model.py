@@ -1,3 +1,4 @@
+from typing import ClassVar
 from pydantic import Field, ConfigDict
 from kalinka_plugin_sdk.module_config import ModuleConfig
 from enum import Enum
@@ -15,12 +16,20 @@ class QobuzConfig(ModuleConfig):
 
     model_config = ConfigDict(use_enum_values=True)
 
+    __module_icon__: ClassVar[str] = "music_note_outlined"
+    __module_icon_color__: ClassVar[str] = "#C9A96A"  # gold
+    __preview_fields__: ClassVar[list[str]] = ["format"]
+
     name: str = Field(default="qobuz", title="Qobuz", frozen=True, exclude=True)
-    email: str = Field(default="my@email.com", title="Qobuz login")
-    password_hash: str = Field(
+    user_auth_token: str = Field(
         default="",
-        title="Qobuz password",
-        json_schema_extra={"password": True},
+        title="User auth token",
+        description=(
+            "Qobuz X-User-Auth-Token. Obtain from the web app: sign in at "
+            "play.qobuz.com, then copy the token from any authenticated "
+            "request header in the browser devtools Network tab."
+        ),
+        json_schema_extra={"widget": "password"},
     )
     format: QobuzAudioFormat = Field(
         default=QobuzAudioFormat.HIRES_192, title="Audio quality"

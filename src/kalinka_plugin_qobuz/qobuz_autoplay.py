@@ -1,10 +1,9 @@
 import logging
 
 from kalinka_plugin_sdk.datamodel import Track
-from kalinka_plugin_sdk.api import PlayQueueAPI
+from kalinka_plugin_sdk.api import PlayQueueController
 from kalinka_plugin_sdk.inputmodule import InputModule
 from kalinka_plugin_sdk.events import (
-    AnyEventPayload,
     TracksAddedEvent,
     RequestMoreTracksEvent,
     TracksRemovedEvent,
@@ -19,7 +18,7 @@ class QobuzAutoplay:
     def __init__(
         self,
         qobuz_client: QobuzClient,
-        playqueue: PlayQueueAPI,
+        playqueue: PlayQueueController,
         track_browser: InputModule,
         amount_to_request: int = 50,
     ):
@@ -40,19 +39,11 @@ class QobuzAutoplay:
             "track_id": int(track.id.id) if track.id else None,
         }
 
-    def add_tracks(self, event: AnyEventPayload) -> None:
-        if not isinstance(event, TracksAddedEvent):
-            logger.warning("Expected TracksAddedEvent, got %s", type(event))
-            return
-
+    def add_tracks(self, event: TracksAddedEvent) -> None:
         self.tracks.extend(event.tracks)
         self.can_request_new = True
 
-    def remove_tracks(self, event: AnyEventPayload) -> None:
-        if not isinstance(event, TracksRemovedEvent):
-            logger.warning("Expected TracksRemovedEvent, got %s", type(event))
-            return
-
+    def remove_tracks(self, event: TracksRemovedEvent) -> None:
         for track in event.indices:
             del self.tracks[track]
 
@@ -64,14 +55,10 @@ class QobuzAutoplay:
     def _has_any_qobuz_tracks(self) -> bool:
         return any(track.id.source == "qobuz" for track in self.tracks)
 
-    def add_recommendation(self, event) -> None:
-        if not isinstance(event, RequestMoreTracksEvent):
-            logger.warning("Expected RequestMoreTracksEvent, got %s", type(event))
-            return
-
+    async def add_recommendation(self, event) -> None:
         if not self.remaining_tracks:
             if self.can_request_new:
-                self._retrieve_new_recommendations()
+                await self._retrieve_new_recommendations()
 
         if not self.remaining_tracks:
             logger.info("No tracks to recommend")
@@ -79,9 +66,11 @@ class QobuzAutoplay:
 
         recommended_track = self.remaining_tracks.pop(0)
         self.suggested_tracks.add(recommended_track)
-        self.playqueue.add(self.track_browser.get_track_info([recommended_track]))
+        await self.playqueue.add(
+            await self.track_browser.get_track_info([recommended_track])
+        )
 
-    def _retrieve_new_recommendations(self) -> None:
+    async def _retrieve_new_recommendations(self) -> None:
         tracks = [track for track in self.tracks if track.id.source == "qobuz"]
         if not tracks:
             logger.debug("No Qobuz tracks available for recommendation")
@@ -107,7 +96,7 @@ class QobuzAutoplay:
             "track_to_analysed": tracks_to_analyze,
         }
 
-        req = self.qobuz_client.session.post(
+        req = await self.qobuz_client.session.post(
             self.qobuz_client.base + "dynamic/suggest",
             json=params,
         )
