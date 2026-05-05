@@ -194,6 +194,29 @@ class QobuzClient:
         self.uat = user_auth_token
         self.session.headers.update({"X-User-Auth-Token": self.uat})
 
+    async def load_user_info(self):
+        """Resolve user_id, credential_id, and membership label from the UAT.
+
+        Required by streaming reports (qobuz_reporter) and by playlist
+        ownership filtering (playlist_user_list). Calls user/login with the
+        token rather than email+password — Qobuz returns the same user object
+        in both modes.
+        """
+        r = await self.session.get(
+            self.base + "user/login",
+            params={"app_id": self.id, "user_auth_token": self.uat},
+        )
+        if r.status_code == 401:
+            raise AuthenticationError("Invalid or expired Qobuz user auth token.")
+        r.raise_for_status()
+        usr_info = r.json()
+        if not usr_info["user"]["credential"]["parameters"]:
+            raise IneligibleError("Free accounts are not eligible to play tracks.")
+        self.label = usr_info["user"]["credential"]["parameters"]["short_label"]
+        logger.info(f"Membership: {self.label}")
+        self.credential_id = usr_info["user"]["credential"]["id"]
+        self.user_id = usr_info["user"]["id"]
+
     async def test_secret(self, sec):
         try:
             await self.get_track_url(track_id=5966783, fmt_id=5, sec=sec)
@@ -347,6 +370,7 @@ async def get_client(config: QobuzConfig) -> QobuzClient:
     secrets = [secret for secret in bundle.get_secrets().values() if secret]
     client = QobuzClient(app_id, secrets)
     client.auth(config.user_auth_token)
+    await client.load_user_info()
     await client.cfg_setup()
     return client
 
