@@ -29,8 +29,10 @@ class QobuzConfig(ModuleConfig):
             "play.qobuz.com, then copy the token from any authenticated "
             "request header in the browser devtools Network tab."
         ),
-        json_schema_extra={"widget": "password"},
+        json_schema_extra={"widget": "password", "importance": "simple"},
     )
     format: QobuzAudioFormat = Field(
-        default=QobuzAudioFormat.HIRES_192, title="Audio quality"
+        default=QobuzAudioFormat.HIRES_192,
+        title="Audio quality",
+        json_schema_extra={"importance": "simple"},
     )
