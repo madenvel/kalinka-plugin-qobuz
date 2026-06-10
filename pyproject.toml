@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "kalinka-plugin-sdk>=1.0,<2",
+    "kalinka-plugin-sdk>=1,<2",
 ]
 
 [project.optional-dependencies]
@@ -38,9 +38,6 @@ kalinka_plugin_qobuz = "kalinka_plugin_qobuz:KalinkaPluginQobuz"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.dynamic]
-version = {attr = "kalinka_plugin_qobuz._version.__version__"}
 
 [tool.setuptools_scm]
 write_to = "src/kalinka_plugin_qobuz/_version.py"
