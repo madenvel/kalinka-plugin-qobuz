@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "kalinka-plugin-sdk>=1.0,<2",
+    "kalinka-plugin-sdk>=1,<2",
 ]
 
 [project.optional-dependencies]
@@ -39,16 +39,14 @@ kalinka_plugin_qobuz = "kalinka_plugin_qobuz:KalinkaPluginQobuz"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.dynamic]
-version = {attr = "kalinka_plugin_qobuz._version.__version__"}
-
 [tool.setuptools_scm]
 write_to = "src/kalinka_plugin_qobuz/_version.py"
 tag_regex = "^kalinka-plugin-qobuz-v(?P<version>\\d+\\.\\d+\\.\\d+)$"
 git_describe_command = "git describe --dirty --tags --long --match kalinka-plugin-qobuz-v*"
 version_scheme = "guess-next-dev"
 local_scheme = "node-and-date"
-fallback_version = "1.0.0"
+# No fallback_version on purpose: a build that cannot read git metadata
+# must fail, not silently produce a mislabelled wheel.
 search_parent_directories = true
 
 [tool.pytest.ini_options]

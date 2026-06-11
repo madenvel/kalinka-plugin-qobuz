@@ -1,11 +1,11 @@
+import asyncio
 import json
 import logging
-import threading
 import time
-from queue import Queue
 from typing import Optional
-from kalinka_plugin_sdk.datamodel import PlayerState, PlayerStateEnum
-from kalinka_plugin_sdk.events import AnyEventPayload, StateChangedEvent
+
+from kalinka_plugin_sdk.datamodel import PlayerStateEnum
+from kalinka_plugin_sdk.events import PlaybackStateChangedEvent
 
 logger = logging.getLogger(__name__.split(".")[-1])
 
@@ -16,12 +16,12 @@ REPORTS_PER_SEC_LIMIT = 3
 class QobuzReporter:
     def __init__(self, qobuz_client):
         self.qobuz_client = qobuz_client
-        self.mqueue = Queue()
-        self.last_report_time = 0
+        self.mqueue: asyncio.Queue = asyncio.Queue()
+        self.last_report_time = time.monotonic_ns()
         self.current_track_id: Optional[str] = None
+        self._loop = asyncio.get_running_loop()
         self._isRunning = True
-        self.sender_job = threading.Thread(target=self._sender_worker, daemon=True)
-        self.sender_job.start()
+        self.sender_job = self._loop.create_task(self._sender_worker())
 
     def get_last_duration(self):
         report_time = time.monotonic_ns()
@@ -29,7 +29,7 @@ class QobuzReporter:
         self.last_report_time = report_time
         return time_played
 
-    def on_state_changed(self, event: AnyEventPayload) -> None:
+    def on_state_changed(self, event: PlaybackStateChangedEvent) -> None:
         """
         Handle player state changes for Qobuz reporting.
 
@@ -37,9 +37,6 @@ class QobuzReporter:
         It properly handles transitions between Qobuz and non-Qobuz tracks by ending
         Qobuz tracking when switching to a different source.
         """
-        if not isinstance(event, StateChangedEvent):
-            logger.warning("Expected StateChangedEvent, got %s", type(event))
-            return
 
         player_state = event.state
         # playing and current track != previous track
@@ -60,7 +57,7 @@ class QobuzReporter:
                     # Track change detected
                     if self.current_track_id is not None:
                         # Report end of previous Qobuz track
-                        self.mqueue.put(
+                        self._enqueue(
                             {
                                 "endpoint": "track/reportStreamingEnd",
                                 "params": self._make_end_report_message(
@@ -70,7 +67,7 @@ class QobuzReporter:
                         )
                     # Start reporting for new Qobuz track
                     self.current_track_id = current_qobuz_track_id
-                    self.mqueue.put(
+                    self._enqueue(
                         {
                             "endpoint": "track/reportStreamingStart",
                             "params": self._make_start_report_message(
@@ -81,7 +78,7 @@ class QobuzReporter:
                     self.get_last_duration()
                 elif self.current_track_id is not None:
                     # Same Qobuz track playing - report streaming end (likely search/seek)
-                    self.mqueue.put(
+                    self._enqueue(
                         {
                             "endpoint": "track/reportStreamingEnd",
                             "params": self._make_end_report_message(
@@ -93,7 +90,7 @@ class QobuzReporter:
                 # Track is not from Qobuz (different source or no track)
                 # If we were previously tracking a Qobuz track, report its end
                 if self.current_track_id is not None:
-                    self.mqueue.put(
+                    self._enqueue(
                         {
                             "endpoint": "track/reportStreamingEnd",
                             "params": self._make_end_report_message(
@@ -102,10 +99,14 @@ class QobuzReporter:
                         }
                     )
                     self.current_track_id = None
-        elif player_state.state in ["STOPPED", "PAUSED", "ERROR"]:
+        elif player_state.state in (
+            PlayerStateEnum.STOPPED,
+            PlayerStateEnum.PAUSED,
+            PlayerStateEnum.ERROR,
+        ):
             # Player stopped/paused/error - report end of any currently tracked Qobuz track
             if self.current_track_id is not None:
-                self.mqueue.put(
+                self._enqueue(
                     {
                         "endpoint": "track/reportStreamingEnd",
                         "params": self._make_end_report_message(
@@ -175,19 +176,34 @@ class QobuzReporter:
             "seek": 0,
         }
 
-    def _sender_worker(self):
+    def _enqueue(self, message: dict) -> None:
+        """
+        Push a report message onto the asyncio queue from any thread/context.
+        """
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is self._loop:
+            self.mqueue.put_nowait(message)
+        else:
+            asyncio.run_coroutine_threadsafe(self.mqueue.put(message), self._loop)
+
+    async def _sender_worker(self):
         while self._isRunning:
+            got_message = False
             try:
-                message = self.mqueue.get()
+                message = await self.mqueue.get()
+                got_message = True
                 if message is None:
                     break
 
-                response = self.qobuz_client.session.post(
+                response = await self.qobuz_client.session.post(
                     self.qobuz_client.base + message["endpoint"],
                     params={"events": json.dumps([message["params"]])},
                 )
-
-                self.mqueue.task_done()
 
                 if not getattr(response, "is_success", False):
                     logger.warning(
@@ -205,12 +221,19 @@ class QobuzReporter:
                             else None
                         ),
                     )
+            except asyncio.CancelledError:
+                logger.debug("Qobuz reporter worker cancelled")
+                break
             except Exception as e:
                 logger.warning("Exception while sending event to Qobuz: %s", e)
+            finally:
+                if got_message:
+                    self.mqueue.task_done()
 
-            time.sleep(REPORTS_PER_SEC_LIMIT)
+            await asyncio.sleep(REPORTS_PER_SEC_LIMIT)
 
-    def shutdown(self):
+    async def shutdown(self):
         self._isRunning = False
-        self.mqueue.put(None)
-        self.sender_job.join()
+        await self.mqueue.put(None)
+        if self.sender_job:
+            await self.sender_job

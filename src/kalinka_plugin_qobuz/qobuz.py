@@ -12,7 +12,6 @@ from pydantic import BaseModel, PositiveInt
 from .bundle import Bundle
 from .config_model import QobuzAudioFormat, QobuzConfig
 
-from kalinka_plugin_sdk.api import EventEmitterAPI
 from kalinka_plugin_sdk.datamodel import (
     Album,
     Artist,
@@ -20,6 +19,7 @@ from kalinka_plugin_sdk.datamodel import (
     BrowseItemList,
     CardSize,
     Catalog,
+    CatalogRole,
     CoverImage,
     EmptyList,
     EntityId,
@@ -34,11 +34,6 @@ from kalinka_plugin_sdk.datamodel import (
     PreviewContentType,
     PreviewType,
     Track,
-)
-from kalinka_plugin_sdk.events import (
-    EventType,
-    FavoriteAddedEvent,
-    FavoriteRemovedEvent,
 )
 from kalinka_plugin_sdk.inputmodule import (
     InputModule,
@@ -74,21 +69,23 @@ class NonStreamable(Exception):
     pass
 
 
-class RetryTransport(httpx.HTTPTransport):
+class RetryTransport(httpx.AsyncHTTPTransport):
     def __init__(self, read_retries=3, **kwargs):
         super().__init__(**kwargs)
         self.read_retries = read_retries
         self.backoff_factor = 0.5
 
-    def handle_request(self, request) -> httpx.Response:
+    async def handle_async_request(self, request) -> httpx.Response:
+        import asyncio
+
         read_retries = 0
         last_exception = None
         while read_retries < self.read_retries:
             try:
-                response = super().handle_request(request)
+                response = await super().handle_async_request(request)
                 if response.status_code >= 500 and response.status_code < 600:
                     read_retries += 1
-                    time.sleep(self.backoff_factor * read_retries)
+                    await asyncio.sleep(self.backoff_factor * read_retries)
                     logger.warning(
                         f"Retry {read_retries} due to status code={response.status_code}"
                     )
@@ -106,12 +103,12 @@ class RetryTransport(httpx.HTTPTransport):
             ) as exc:
                 last_exception = exc
                 read_retries += 1
-                time.sleep(self.backoff_factor * read_retries)
+                await asyncio.sleep(self.backoff_factor * read_retries)
                 logger.warning(f"Retry {read_retries} due to {exc}")
         # If all retries failed, raise the last exception
         if last_exception is not None:
             raise last_exception
-        raise RuntimeError("handle_request failed without exception")
+        raise RuntimeError("handle_async_request failed without exception")
 
 
 # The code below is partially based on the code from
@@ -158,11 +155,11 @@ class LastUpdate(BaseModel):
 
 
 class QobuzClient:
-    def __init__(self, email, pwd, app_id, secrets):
+    def __init__(self, app_id, secrets):
         logger.info(f"Logging...")
         self.secrets = secrets
         self.id = str(app_id)
-        self.session = httpx.Client(
+        self.session = httpx.AsyncClient(
             transport=RetryTransport(
                 read_retries=3, retries=3, http2=True, http1=False
             ),
@@ -170,7 +167,7 @@ class QobuzClient:
         )
         self.session.headers.update(
             {
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
                 "X-App-Id": self.id,
             }
         )
@@ -179,59 +176,68 @@ class QobuzClient:
         self.sec = None
         # a short living cache to be used for reporting purposes
         self.track_url_response_cache = {}
-        self.auth(email, pwd)
-        self.cfg_setup()
-
         self.last_update = LastUpdate()
         self.cached = {"albums": {}, "artists": {}, "tracks": {}, "playlists": {}}
 
-    def auth(self, email, pwd):
-        params = {
-            "email": email,
-            "password": pwd,
-            "app_id": self.id,
-        }
-        r = self.session.get(self.base + "user/login", params=params)
-        if r.status_code == 401:
-            raise AuthenticationError("Invalid credentials.")
-        elif r.status_code == 400:
-            raise InvalidAppIdError("Invalid app id.")
-        else:
-            logger.info("Logged: OK")
+    def auth(self, user_auth_token: str):
+        """Attach the pre-issued user auth token to the session.
 
+        The token is obtained out-of-band from the Qobuz web app
+        (play.qobuz.com) — users copy it from the browser devtools and paste
+        it into the plugin config. All subsequent API calls ride on this
+        header; a bad/expired token surfaces as 401 at the first real call.
+        """
+        if not user_auth_token:
+            raise AuthenticationError(
+                "Qobuz user auth token is not configured."
+            )
+        self.uat = user_auth_token
+        self.session.headers.update({"X-User-Auth-Token": self.uat})
+
+    async def load_user_info(self):
+        """Resolve user_id, credential_id, and membership label from the UAT.
+
+        Required by streaming reports (qobuz_reporter) and by playlist
+        ownership filtering (playlist_user_list). Calls user/login with the
+        token rather than email+password — Qobuz returns the same user object
+        in both modes.
+        """
+        r = await self.session.get(
+            self.base + "user/login",
+            params={"app_id": self.id, "user_auth_token": self.uat},
+        )
+        if r.status_code == 401:
+            raise AuthenticationError("Invalid or expired Qobuz user auth token.")
         r.raise_for_status()
         usr_info = r.json()
-
         if not usr_info["user"]["credential"]["parameters"]:
             raise IneligibleError("Free accounts are not eligible to play tracks.")
-        self.uat = usr_info["user_auth_token"]
-        self.session.headers.update({"X-User-Auth-Token": self.uat})
         self.label = usr_info["user"]["credential"]["parameters"]["short_label"]
         logger.info(f"Membership: {self.label}")
         self.credential_id = usr_info["user"]["credential"]["id"]
         self.user_id = usr_info["user"]["id"]
 
-    def test_secret(self, sec):
+    async def test_secret(self, sec):
         try:
-            self.get_track_url(track_id=5966783, fmt_id=5, sec=sec)
+            await self.get_track_url(track_id=5966783, fmt_id=5, sec=sec)
             return True
         except InvalidAppSecretError:
             return False
 
-    def cfg_setup(self):
+    async def cfg_setup(self):
         for secret in self.secrets:
             # Falsy secrets
             if not secret:
                 continue
 
-            if self.test_secret(secret):
+            if await self.test_secret(secret):
                 self.sec = secret
                 break
 
         if self.sec is None:
             raise InvalidAppSecretError("Can't find any valid app secret.")
 
-    def get_track_url(self, track_id, fmt_id=5, sec=None):
+    async def get_track_url(self, track_id, fmt_id=5, sec=None):
         epoint = "track/getFileUrl"
         unix = time.time()
         if int(fmt_id) not in (5, 6, 7, 27):
@@ -251,7 +257,7 @@ class QobuzClient:
         r = None
         for _ in range(3):
             try:
-                r = self.session.get(self.base + epoint, params=params)
+                r = await self.session.get(self.base + epoint, params=params)
                 break
             except ConnectionError as e:
                 logger.error(f"Connection error, retrying {_}: {e}")
@@ -266,20 +272,20 @@ class QobuzClient:
         self.track_url_response_cache[str(track_id)] = r.json()
         return r.json()
 
-    def get_track_meta(self, track_id):
+    async def get_track_meta(self, track_id):
         epoint = "track/get"
         params = {"track_id": track_id}
-        r = self.session.get(self.base + epoint, params=params)
+        r = await self.session.get(self.base + epoint, params=params)
         if r.status_code == 400:
             raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.")
 
         r.raise_for_status()
         return r.json()
 
-    def get_tracks_meta(self, track_ids: list[int]):
+    async def get_tracks_meta(self, track_ids: list[int]):
         epoint = "track/getList"
         params = {"tracks_id": track_ids}
-        r = self.session.post(self.base + epoint, json=params)
+        r = await self.session.post(self.base + epoint, json=params)
 
         if r.status_code == 400:
             raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.")
@@ -287,30 +293,33 @@ class QobuzClient:
         r.raise_for_status()
         return r.json()["tracks"]["items"]
 
-    def get_qobuz_last_update(self):
-        r = self.session.get(self.base + "user/lastUpdate")
+    async def get_qobuz_last_update(self):
+        r = await self.session.get(self.base + "user/lastUpdate")
         r.raise_for_status()
 
         return r.json()["last_update"]
 
-    def get_user_playlists(self, offset: int = 0, limit: int = 50, owner_id=None):
-        r = self.session.get(
+    async def get_user_playlists(self, offset: int = 0, limit: int = 50, owner_id=None):
+        # Owner filtering has to happen locally, which breaks server-side
+        # pagination (a page of raw results shrinks unpredictably after
+        # filtering). Fetch the full list and paginate here, exactly once.
+        r = await self.session.get(
             self.base + "playlist/getUserPlaylists",
-            params={"offset": offset, "limit": limit},
+            params={"offset": 0, "limit": 500},
         )
 
         r.raise_for_status()
 
-        cached = {"playlists": r.json()["playlists"]}
+        all_playlists = r.json()["playlists"]["items"]
 
         if owner_id is not None:
             filtered_playlists = [
                 playlist
-                for playlist in cached["playlists"]["items"]
+                for playlist in all_playlists
                 if playlist["owner"]["id"] == owner_id
             ]
         else:
-            filtered_playlists = cached["playlists"]["items"]
+            filtered_playlists = all_playlists
 
         playlists = {
             "offset": offset,
@@ -321,8 +330,10 @@ class QobuzClient:
 
         return {"playlists": playlists}
 
-    def get_user_favorites(self, type: SearchType, offset: int = 0, limit: int = 50):
-        last_update = self.get_qobuz_last_update()[
+    async def get_user_favorites(
+        self, type: SearchType, offset: int = 0, limit: int = 50
+    ):
+        last_update = (await self.get_qobuz_last_update())[
             {
                 SearchType.album: "favorite_album",
                 SearchType.artist: "favorite_artist",
@@ -334,7 +345,7 @@ class QobuzClient:
 
         if last_update != getattr(self.last_update, f"favorite_{type_name}_ts"):
             logger.info(f"Updating user favorites cache for {type_name}")
-            r = self.session.get(
+            r = await self.session.get(
                 self.base + "favorite/getUserFavorites",
                 params={"type": type.value + "s", "offset": 0, "limit": 500},
             )
@@ -355,19 +366,20 @@ class QobuzClient:
         return {type_name: retval}
 
 
-def get_client(config: QobuzConfig) -> QobuzClient:
-    email = config.email
-    password = config.password_hash
+async def get_client(config: QobuzConfig) -> QobuzClient:
     bundle = Bundle()
 
     app_id = bundle.get_app_id()
     secrets = [secret for secret in bundle.get_secrets().values() if secret]
-    client = QobuzClient(email, password, app_id, secrets)
+    client = QobuzClient(app_id, secrets)
+    client.auth(config.user_auth_token)
+    await client.load_user_info()
+    await client.cfg_setup()
     return client
 
 
-def qobuz_link_retriever(qobuz_client, id, format_id) -> TrackUrl:
-    track = qobuz_client.get_track_url(id, fmt_id=format_id)
+async def qobuz_link_retriever(qobuz_client, id, format_id) -> TrackUrl:
+    track = await qobuz_client.get_track_url(id, fmt_id=format_id)
     track_url = TrackUrl(url=track["url"], format=track["mime_type"])
     return track_url
 
@@ -426,26 +438,24 @@ class QobuzInputModule(InputModule):
         self,
         config: QobuzConfig,
         qobuz_client: QobuzClient,
-        event_emitter: EventEmitterAPI,
     ):
         self.format_id = (5, 6, 7, 27)[
             list(QobuzAudioFormat).index(QobuzAudioFormat(config.format))
         ]
         logger.info(f"Selecting Format '{config.format}', id = {self.format_id}")
         self.qobuz_client = qobuz_client
-        self.event_emitter = event_emitter
         self.last_update = LastUpdate()
         self.user_playlist = []
 
     def module_name(self) -> str:
         return "Qobuz"
 
-    def search(
+    async def search(
         self, type: SearchType, query: str, offset=0, limit=50
     ) -> BrowseItemList:
-        return self._search_items(type, query, offset, limit)
+        return await self._search_items(type, query, offset, limit)
 
-    def browse(
+    async def browse(
         self,
         entity_id: EntityId,
         offset: PositiveInt = 0,
@@ -453,22 +463,22 @@ class QobuzInputModule(InputModule):
         genre_ids: List[EntityId] = [],
     ) -> BrowseItemList:
         if entity_id.type == EntityType.ALBUM:
-            return self._browse_album(entity_id.id, offset, limit)
+            return await self._browse_album(entity_id.id, offset, limit)
         elif entity_id.type == EntityType.PLAYLIST:
-            return self._browse_playlist(entity_id.id, offset, limit)
+            return await self._browse_playlist(entity_id.id, offset, limit)
         elif entity_id.type == EntityType.ARTIST:
-            return self._browse_artist(entity_id.id, offset, limit)
+            return await self._browse_artist(entity_id.id, offset, limit)
         elif entity_id.type == EntityType.CATALOG:
-            return self._browse_catalog(
+            return await self._browse_catalog(
                 entity_id.id, offset=offset, limit=limit, genre_ids=genre_ids
             )
         else:
             return EmptyList(offset, limit)
 
-    def _browse_album(
+    async def _browse_album(
         self, id: str, offset: int = 0, limit: int = 50
     ) -> BrowseItemList:
-        response = self.qobuz_client.session.get(
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "album/get",
             params={"album_id": id, "offset": offset, "limit": limit},
         )
@@ -491,10 +501,10 @@ class QobuzInputModule(InputModule):
             ),
         )
 
-    def _browse_playlist(
+    async def _browse_playlist(
         self, id: str, offset: int = 0, limit: int = 50
     ) -> BrowseItemList:
-        response = self.qobuz_client.session.get(
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "playlist/get",
             params={
                 "playlist_id": id,
@@ -518,10 +528,10 @@ class QobuzInputModule(InputModule):
             ),
         )
 
-    def _browse_artist(
+    async def _browse_artist(
         self, id: str, offset: int = 0, limit: int = 50
     ) -> BrowseItemList:
-        response = self.qobuz_client.session.get(
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "artist/get",
             params={
                 "artist_id": id,
@@ -543,13 +553,15 @@ class QobuzInputModule(InputModule):
             items=self._albums_to_browse_category(response.json()["albums"]["items"]),
         )
 
-    def list_favorite(
+    async def list_favorite(
         self, type: SearchType, filter: str, offset: int = 0, limit: int = 50
     ) -> BrowseItemList:
         if type == SearchType.playlist:
-            rjson = self.qobuz_client.get_user_playlists(offset=0, limit=500)
+            rjson = await self.qobuz_client.get_user_playlists(offset=0, limit=500)
         else:
-            rjson = self.qobuz_client.get_user_favorites(type, offset=0, limit=500)
+            rjson = await self.qobuz_client.get_user_favorites(
+                type, offset=0, limit=500
+            )
 
         result = self._format_list_response(rjson, offset, limit)
         filtered_items = [
@@ -568,7 +580,7 @@ class QobuzInputModule(InputModule):
 
         return filtered_result
 
-    def _browse_catalog(
+    async def _browse_catalog(
         self,
         endpoint: str,
         offset: int = 0,
@@ -593,6 +605,7 @@ class QobuzInputModule(InputModule):
                             rows_count=1,
                             aspect_ratio=1.0,
                         ),
+                        role=CatalogRole.HIDE_ON_HOME,
                     ),
                 ),
                 BrowseItem(
@@ -611,6 +624,7 @@ class QobuzInputModule(InputModule):
                             rows_count=2,
                             aspect_ratio=1.0,
                         ),
+                        role=CatalogRole.DISCOVERY,
                     ),
                 ),
                 BrowseItem(
@@ -629,6 +643,7 @@ class QobuzInputModule(InputModule):
                             rows_count=2,
                             aspect_ratio=1 / 0.475,
                         ),
+                        role=CatalogRole.INDEX,
                     ),
                 ),
                 BrowseItem(
@@ -647,6 +662,7 @@ class QobuzInputModule(InputModule):
                             items_count=20,
                             aspect_ratio=1 / 0.475,
                         ),
+                        role=CatalogRole.HIDE_ON_HOME,
                     ),
                 ),
                 BrowseItem(
@@ -666,6 +682,7 @@ class QobuzInputModule(InputModule):
                             aspect_ratio=1.0,
                             card_size=CardSize.LARGE,
                         ),
+                        role=CatalogRole.FEATURED,
                     ),
                 ),
                 BrowseItem(
@@ -685,6 +702,7 @@ class QobuzInputModule(InputModule):
                             items_count=20,
                             card_size=CardSize.SMALL,
                         ),
+                        role=CatalogRole.DISCOVERY,
                     ),
                 ),
             ]
@@ -695,39 +713,49 @@ class QobuzInputModule(InputModule):
                 items=all_items[offset : offset + limit],
             )
         elif endpoint == "recent-releases":
-            res = self._get_new_releases(
+            res = await self._get_new_releases(
                 "new-releases-full", offset, max(0, min(5 - offset, limit)), genre_ids
             )
             res.total = min(res.total, 5)
             return res
         elif endpoint == "new-releases":
-            return self._get_new_releases("new-releases-full", offset, limit, genre_ids)
+            return await self._get_new_releases(
+                "new-releases-full", offset, limit, genre_ids
+            )
         elif endpoint == "qobuz-playlists":
-            return self._get_qobuz_playlists(offset, limit, genre_ids)
+            return await self._get_qobuz_playlists(offset, limit, genre_ids)
         elif endpoint == "playlist-by-category":
-            return self._get_playists_by_category(offset, limit, genre_ids)
+            return await self._get_playists_by_category(offset, limit, genre_ids)
         elif endpoint == "press-awards":
-            return self._get_new_releases("press-awards", offset, limit, genre_ids)
+            return await self._get_new_releases(
+                "press-awards", offset, limit, genre_ids
+            )
         elif endpoint == "most-streamed":
-            return self._get_new_releases("most-streamed", offset, limit, genre_ids)
+            return await self._get_new_releases(
+                "most-streamed", offset, limit, genre_ids
+            )
         else:
             ep = endpoint.split("_")
             if len(ep) > 1:
                 if ep[0] == "playlist-by-category":
-                    return self._get_qobuz_playlists(offset, limit, genre_ids, ep[1])
+                    return await self._get_qobuz_playlists(
+                        offset, limit, genre_ids, ep[1]
+                    )
                 elif ep[0] == "album-suggestions":
-                    return self._suggest_albums_similar_to(ep[1], offset, limit)
+                    return await self._suggest_albums_similar_to(ep[1], offset, limit)
                 elif ep[0] == "playlist-suggestions":
-                    return self._suggest_playlists_similar_to(ep[1], offset, limit)
+                    return await self._suggest_playlists_similar_to(
+                        ep[1], offset, limit
+                    )
                 elif ep[0] == "similar-artists":
-                    return self._suggest_artists_similar_to(ep[1], offset, limit)
+                    return await self._suggest_artists_similar_to(ep[1], offset, limit)
 
         return EmptyList(offset, limit)
 
-    def _get_new_releases(
+    async def _get_new_releases(
         self, type: str, offset: int, limit: int, genre_ids: list[EntityId]
     ) -> BrowseItemList:
-        response = self.qobuz_client.session.get(
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "/album/getFeatured",
             params={
                 "type": type,
@@ -749,14 +777,14 @@ class QobuzInputModule(InputModule):
             items=self._albums_to_browse_category(response.json()["albums"]["items"]),
         )
 
-    def _get_qobuz_playlists(
+    async def _get_qobuz_playlists(
         self,
         offset: int,
         limit: int,
         genre_ids: list[EntityId],
         tags: str | None = None,
     ):
-        response = self.qobuz_client.session.get(
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "/playlist/getFeatured",
             params={
                 "type": "editor-picks",
@@ -781,10 +809,10 @@ class QobuzInputModule(InputModule):
             ),
         )
 
-    def _get_playists_by_category(
+    async def _get_playists_by_category(
         self, offset: int, limit: int, genre_ids: List[EntityId]
     ):
-        response = self.qobuz_client.session.get(
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "/playlist/getTags",
             params={
                 "offset": offset,
@@ -822,8 +850,8 @@ class QobuzInputModule(InputModule):
             ][offset : offset + limit],
         )
 
-    def _get_artist_tracks(self, artist_id: str, offset: int, limit: int):
-        response = self.qobuz_client.session.get(
+    async def _get_artist_tracks(self, artist_id: str, offset: int, limit: int):
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "/artist/getTracks",
             params={
                 "id": artist_id,
@@ -844,7 +872,7 @@ class QobuzInputModule(InputModule):
             items=self._tracks_to_browse_categories(response.json()["tracks"]["items"]),
         )
 
-    def get_track_info(self, track_ids: list[str]) -> list[TrackInfo]:
+    async def get_track_info(self, track_ids: list[str]) -> list[TrackInfo]:
         if len(track_ids) == 0:
             return []
 
@@ -852,16 +880,19 @@ class QobuzInputModule(InputModule):
         chunk_size = 49
         for i in range(0, len(track_ids), chunk_size):
             chunk = track_ids[i : i + chunk_size]
-            tracks = self.qobuz_client.get_tracks_meta([int(_) for _ in chunk])
+            tracks = await self.qobuz_client.get_tracks_meta([int(_) for _ in chunk])
             all_tracks.extend(tracks)
         return [self._track_to_track_info(track) for track in all_tracks]
 
     def _track_to_track_info(self, track):
+        async def async_link_retriever():
+            return await qobuz_link_retriever(
+                self.qobuz_client, track["id"], self.format_id
+            )
+
         track_info = TrackInfo(
             id=track_id(str(track["id"])),
-            link_retriever=partial(
-                qobuz_link_retriever, self.qobuz_client, track["id"], self.format_id
-            ),
+            link_retriever=async_link_retriever,
             metadata=metadata_from_track(track),
         )
 
@@ -914,8 +945,8 @@ class QobuzInputModule(InputModule):
             result.append(browse_item)
         return result
 
-    def _search_items(self, item_type, query, offset, limit):
-        response = self.qobuz_client.session.get(
+    async def _search_items(self, item_type, query, offset, limit):
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + item_type.value + "/search",
             params={"query": query, "limit": limit, "offset": offset},
         )
@@ -1224,8 +1255,8 @@ class QobuzInputModule(InputModule):
             track_count=playlist["tracks_count"],
         )
 
-    def get_favorite_ids(self) -> FavoriteIds:
-        response = self.qobuz_client.session.get(
+    async def get_favorite_ids(self) -> FavoriteIds:
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "favorite/getUserFavoriteIds",
             params={"limit": 5000},
         )
@@ -1239,17 +1270,17 @@ class QobuzInputModule(InputModule):
             albums=[album_id(str(id)) for id in rjson["albums"]],
             artists=[artist_id(str(id)) for id in rjson["artists"]],
             tracks=[track_id(str(id)) for id in rjson["tracks"]],
-            playlists=self._get_favorite_playlist_ids(),
+            playlists=await self._get_favorite_playlist_ids(),
         )
 
-    def _get_favorite_playlist_ids(self) -> list[EntityId]:
-        rjson = self.qobuz_client.get_user_playlists(limit=500)
+    async def _get_favorite_playlist_ids(self) -> list[EntityId]:
+        rjson = await self.qobuz_client.get_user_playlists(limit=500)
 
         return [
             playlist_id(str(playlist["id"])) for playlist in rjson["playlists"]["items"]
         ]
 
-    def add_to_favorite(self, id: str):
+    async def add_to_favorite(self, id: str):
         entity_id = EntityId.from_string(id)
 
         if entity_id.type == EntityType.PLAYLIST:
@@ -1259,7 +1290,7 @@ class QobuzInputModule(InputModule):
             endpoint = "favorite/create"
             params = {entity_id.type.value + "_ids": entity_id.id}
 
-        response = self.qobuz_client.session.post(
+        response = await self.qobuz_client.session.post(
             self.qobuz_client.base + endpoint, params=params
         )
 
@@ -1272,11 +1303,7 @@ class QobuzInputModule(InputModule):
         if "status" not in rjson or rjson["status"] != "success":
             raise Exception(f"Failed to add to favorite: {response.text}")
 
-        self.event_emitter.dispatch(
-            FavoriteAddedEvent(id=entity_id),
-        )
-
-    def remove_from_favorite(self, id: str):
+    async def remove_from_favorite(self, id: str):
         entity_id = EntityId.from_string(id)
 
         if entity_id.type == EntityType.PLAYLIST:
@@ -1286,7 +1313,7 @@ class QobuzInputModule(InputModule):
             endpoint = "favorite/delete"
             params = {entity_id.type.value + "_ids": entity_id.id}
 
-        response = self.qobuz_client.session.post(
+        response = await self.qobuz_client.session.post(
             self.qobuz_client.base + endpoint, params=params
         )
 
@@ -1297,13 +1324,11 @@ class QobuzInputModule(InputModule):
         if "status" not in rjson or rjson["status"] != "success":
             raise Exception(f"Failed to remove from favorite: {response.text}")
 
-        self.event_emitter.dispatch(
-            FavoriteRemovedEvent(id=entity_id),
-        )
-
-    def list_genre(self, offset: int, limit: int) -> GenreList:
+    async def list_genre(self, offset: int, limit: int) -> GenreList:
         endpoint = "genre/list"
-        response = self.qobuz_client.session.get(self.qobuz_client.base + endpoint)
+        response = await self.qobuz_client.session.get(
+            self.qobuz_client.base + endpoint
+        )
 
         response.raise_for_status()
 
@@ -1322,20 +1347,20 @@ class QobuzInputModule(InputModule):
             ],
         )
 
-    def get(self, entity_id: EntityId) -> BrowseItem:
+    async def get(self, entity_id: EntityId) -> BrowseItem:
         if entity_id.type == EntityType.ALBUM:
-            return self._album_get(entity_id.id)
+            return await self._album_get(entity_id.id)
         elif entity_id.type == EntityType.PLAYLIST:
-            return self._playlist_get(entity_id.id)
+            return await self._playlist_get(entity_id.id)
         elif entity_id.type == EntityType.ARTIST:
-            return self._artist_get(entity_id.id)
+            return await self._artist_get(entity_id.id)
         elif entity_id.type == EntityType.TRACK:
-            return self._track_get(entity_id.id)
+            return await self._track_get(entity_id.id)
         else:
             raise ValueError(f"Unsupported EntityId type: {entity_id.type.name}")
 
-    def _album_get(self, id: str) -> BrowseItem:
-        response = self.qobuz_client.session.get(
+    async def _album_get(self, id: str) -> BrowseItem:
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "album/get",
             params={"album_id": id, "offset": 0, "limit": 0},
         )
@@ -1346,8 +1371,8 @@ class QobuzInputModule(InputModule):
 
         return self._albums_to_browse_category([rjson])[0]
 
-    def _playlist_get(self, id: str) -> BrowseItem:
-        response = self.qobuz_client.session.get(
+    async def _playlist_get(self, id: str) -> BrowseItem:
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "playlist/get",
             params={
                 "playlist_id": id,
@@ -1362,8 +1387,8 @@ class QobuzInputModule(InputModule):
 
         return self._playlists_to_browse_category([rjson])[0]
 
-    def _artist_get(self, id: str) -> BrowseItem:
-        response = self.qobuz_client.session.get(
+    async def _artist_get(self, id: str) -> BrowseItem:
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "artist/get",
             params={
                 "artist_id": id,
@@ -1376,8 +1401,8 @@ class QobuzInputModule(InputModule):
 
         return self._artists_to_browse_category([rjson])[0]
 
-    def _track_get(self, id: str) -> BrowseItem:
-        rjson = self.qobuz_client.get_track_meta(id)
+    async def _track_get(self, id: str) -> BrowseItem:
+        rjson = await self.qobuz_client.get_track_meta(id)
         return self._tracks_to_browse_categories([rjson])[0]
 
     def _to_playlist_response(self, obj):
@@ -1392,15 +1417,17 @@ class QobuzInputModule(InputModule):
             ),
         )
 
-    def playlist_user_list(self, offset: int = 0, limit: int = 25) -> BrowseItemList:
-        rjson = self.qobuz_client.get_user_playlists(
+    async def playlist_user_list(
+        self, offset: int = 0, limit: int = 25
+    ) -> BrowseItemList:
+        rjson = await self.qobuz_client.get_user_playlists(
             offset=offset, limit=limit, owner_id=self.qobuz_client.user_id
         )
 
         return self._format_list_response(rjson, offset, limit)
 
-    def playlist_create(self, name, description) -> Playlist:
-        response = self.qobuz_client.session.post(
+    async def playlist_create(self, name, description) -> Playlist:
+        response = await self.qobuz_client.session.post(
             self.qobuz_client.base + "playlist/create",
             params={"name": name, "description": description},
         )
@@ -1411,8 +1438,8 @@ class QobuzInputModule(InputModule):
 
         return self._to_playlist_response(rjson)
 
-    def playlist_update(self, id, name, description) -> Playlist:
-        response = self.qobuz_client.session.post(
+    async def playlist_update(self, id, name, description) -> Playlist:
+        response = await self.qobuz_client.session.post(
             self.qobuz_client.base + "playlist/update",
             params={
                 "playlist_id": EntityId.from_string(id).id,
@@ -1427,8 +1454,8 @@ class QobuzInputModule(InputModule):
 
         return self._to_playlist_response(rjson)
 
-    def playlist_delete(self, id):
-        response = self.qobuz_client.session.post(
+    async def playlist_delete(self, id):
+        response = await self.qobuz_client.session.post(
             self.qobuz_client.base + "playlist/delete",
             params={"playlist_id": EntityId.from_string(id).id},
         )
@@ -1437,10 +1464,10 @@ class QobuzInputModule(InputModule):
 
         return response.json()
 
-    def playlist_add_tracks(
+    async def playlist_add_tracks(
         self, id: str, track_ids: List[str], allow_duplicates: bool
     ) -> Playlist:
-        response = self.qobuz_client.session.post(
+        response = await self.qobuz_client.session.post(
             self.qobuz_client.base + "playlist/addTracks",
             params={
                 "no_duplicate": not allow_duplicates,
@@ -1456,8 +1483,8 @@ class QobuzInputModule(InputModule):
 
         return self._to_playlist_response(rjson)
 
-    def playlist_remove_tracks(self, id, playlist_track_ids):
-        response = self.qobuz_client.session.post(
+    async def playlist_remove_tracks(self, id, playlist_track_ids):
+        response = await self.qobuz_client.session.post(
             self.qobuz_client.base + "playlist/deleteTracks",
             params={
                 "playlist_id": EntityId.from_string(id).id,
@@ -1470,10 +1497,10 @@ class QobuzInputModule(InputModule):
 
         return self._to_playlist_response(rjson)
 
-    def _suggest_albums_similar_to(
+    async def _suggest_albums_similar_to(
         self, id: str, offset: int = 0, limit: int = 25
     ) -> BrowseItemList:
-        response = self.qobuz_client.session.get(
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "album/suggest",
             params={"album_id": id},
         )
@@ -1491,8 +1518,10 @@ class QobuzInputModule(InputModule):
             items=self._albums_to_browse_category(albums),
         )
 
-    def _suggest_playlists_similar_to(self, id: str, offset: int, limit: int = 10):
-        response = self.qobuz_client.session.get(
+    async def _suggest_playlists_similar_to(
+        self, id: str, offset: int, limit: int = 10
+    ):
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "playlist/get",
             params={"playlist_id": id, "extra": "getSimilarPlaylists"},
         )
@@ -1510,8 +1539,8 @@ class QobuzInputModule(InputModule):
             items=self._playlists_to_browse_category(playlists),
         )
 
-    def _suggest_artists_similar_to(self, id: str, offset: int, limit: int = 10):
-        response = self.qobuz_client.session.get(
+    async def _suggest_artists_similar_to(self, id: str, offset: int, limit: int = 10):
+        response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "artist/getSimilarArtists",
             params={"artist_id": id, "offset": offset, "limit": limit},
         )
@@ -1526,5 +1555,5 @@ class QobuzInputModule(InputModule):
             items=self._artists_to_browse_category(artists),
         )
 
-    def get_resource_path(self, id) -> str | None:
+    async def get_resource_path(self, id) -> str | None:
         return None
