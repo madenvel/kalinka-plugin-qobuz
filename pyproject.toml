@@ -45,7 +45,8 @@ tag_regex = "^kalinka-plugin-qobuz-v(?P<version>\\d+\\.\\d+\\.\\d+)$"
 git_describe_command = "git describe --dirty --tags --long --match kalinka-plugin-qobuz-v*"
 version_scheme = "guess-next-dev"
 local_scheme = "node-and-date"
-fallback_version = "1.0.0"
+# No fallback_version on purpose: a build that cannot read git metadata
+# must fail, not silently produce a mislabelled wheel.
 search_parent_directories = true
 
 [tool.pytest.ini_options]
