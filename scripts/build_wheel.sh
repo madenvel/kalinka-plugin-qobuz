@@ -17,8 +17,9 @@ VERSION=$(python3 -m setuptools_scm)
 case "${VERSION}" in
     *.dev*)
         echo "Warning: building untagged dev version ${VERSION}." >&2
-        echo "If you expected a release build, fetch the release tag first:" >&2
-        echo "    git fetch --tags && git checkout kalinka-plugin-qobuz-v<X.Y.Z>" >&2
+        echo "If you expected a release build, check out the release tag first:" >&2
+        echo "    git fetch --tags --force && git checkout kalinka-plugin-qobuz-v<X.Y.Z>" >&2
+        echo "(--force matters: plain --tags will not update a tag that moved)" >&2
         ;;
 esac
 
