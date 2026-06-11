@@ -99,7 +99,11 @@ class QobuzReporter:
                         }
                     )
                     self.current_track_id = None
-        elif player_state.state in ["STOPPED", "PAUSED", "ERROR"]:
+        elif player_state.state in (
+            PlayerStateEnum.STOPPED,
+            PlayerStateEnum.PAUSED,
+            PlayerStateEnum.ERROR,
+        ):
             # Player stopped/paused/error - report end of any currently tracked Qobuz track
             if self.current_track_id is not None:
                 self._enqueue(

@@ -9,7 +9,6 @@ from kalinka_plugin_sdk import (
     TracksRemovedEvent,
 )
 from kalinka_plugin_sdk.plugin import InputPluginContext, InputModulePlugin
-from kalinka_plugin_sdk.events import PlayQueueEventType
 from kalinka_plugin_sdk.inputmodule import InputModule
 
 from .config_model import QobuzConfig
@@ -21,14 +20,11 @@ logger = logging.getLogger(__name__.split(".")[-1])
 
 
 class KalinkaPluginQobuz(InputModulePlugin):
-    REQUIRES_SDK = ">=1.0,<2"
+    REQUIRES_SDK = ">=1,<2"
     PLUGIN_ID = "qobuz"
     CONFIG_MODEL = QobuzConfig
 
     def __init__(self):
-        self.autoplay_subscriptions = []
-        self.reporter_subscriptions = []
-        self.autoplay = None
         self.reporter = None
         self.interface: Optional[InputModule] = None
         self._qobuz_tasks = None

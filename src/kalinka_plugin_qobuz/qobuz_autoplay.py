@@ -55,7 +55,7 @@ class QobuzAutoplay:
     def _has_any_qobuz_tracks(self) -> bool:
         return any(track.id.source == "qobuz" for track in self.tracks)
 
-    async def add_recommendation(self, event) -> None:
+    async def add_recommendation(self, _event: RequestMoreTracksEvent) -> None:
         if not self.remaining_tracks:
             if self.can_request_new:
                 await self._retrieve_new_recommendations()

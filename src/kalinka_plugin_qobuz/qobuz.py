@@ -300,23 +300,26 @@ class QobuzClient:
         return r.json()["last_update"]
 
     async def get_user_playlists(self, offset: int = 0, limit: int = 50, owner_id=None):
+        # Owner filtering has to happen locally, which breaks server-side
+        # pagination (a page of raw results shrinks unpredictably after
+        # filtering). Fetch the full list and paginate here, exactly once.
         r = await self.session.get(
             self.base + "playlist/getUserPlaylists",
-            params={"offset": offset, "limit": limit},
+            params={"offset": 0, "limit": 500},
         )
 
         r.raise_for_status()
 
-        cached = {"playlists": r.json()["playlists"]}
+        all_playlists = r.json()["playlists"]["items"]
 
         if owner_id is not None:
             filtered_playlists = [
                 playlist
-                for playlist in cached["playlists"]["items"]
+                for playlist in all_playlists
                 if playlist["owner"]["id"] == owner_id
             ]
         else:
-            filtered_playlists = cached["playlists"]["items"]
+            filtered_playlists = all_playlists
 
         playlists = {
             "offset": offset,
@@ -1300,10 +1303,6 @@ class QobuzInputModule(InputModule):
         if "status" not in rjson or rjson["status"] != "success":
             raise Exception(f"Failed to add to favorite: {response.text}")
 
-        # self.event_emitter.dispatch(
-        #     FavoriteAddedEvent(id=entity_id),
-        # )
-
     async def remove_from_favorite(self, id: str):
         entity_id = EntityId.from_string(id)
 
@@ -1324,10 +1323,6 @@ class QobuzInputModule(InputModule):
 
         if "status" not in rjson or rjson["status"] != "success":
             raise Exception(f"Failed to remove from favorite: {response.text}")
-
-        # self.event_emitter.dispatch(
-        #     FavoriteRemovedEvent(id=entity_id),
-        # )
 
     async def list_genre(self, offset: int, limit: int) -> GenreList:
         endpoint = "genre/list"
