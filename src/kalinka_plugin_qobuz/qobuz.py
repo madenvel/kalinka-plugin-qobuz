@@ -367,10 +367,23 @@ class QobuzClient:
 
 
 async def get_client(config: QobuzConfig) -> QobuzClient:
+    # Fetching and parsing the play.qobuz.com web bundle (a multi-megabyte
+    # download from which the app id + signing secrets are scraped) is a
+    # synchronous, network-bound step and the slowest part of Qobuz startup.
+    # Bracket it with explicit INFO logs so the server log makes it obvious
+    # when this blocking phase starts, finishes, and how long it took.
+    logger.info("Loading Qobuz web bundle (app id + secrets)...")
+    bundle_start = time.monotonic()
     bundle = Bundle()
-
     app_id = bundle.get_app_id()
     secrets = [secret for secret in bundle.get_secrets().values() if secret]
+    logger.info(
+        "Qobuz web bundle loaded in %.1fs (app id %s, %d secret(s))",
+        time.monotonic() - bundle_start,
+        app_id,
+        len(secrets),
+    )
+
     client = QobuzClient(app_id, secrets)
     client.auth(config.user_auth_token)
     await client.load_user_info()
