@@ -10,6 +10,11 @@ import httpx
 from pydantic import BaseModel, PositiveInt
 
 from .bundle import Bundle
+from .bundle_cache import (
+    clear_cached_bundle,
+    load_cached_bundle,
+    save_cached_bundle,
+)
 from .config_model import QobuzAudioFormat, QobuzConfig
 
 from kalinka_plugin_sdk.datamodel import (
@@ -366,15 +371,49 @@ class QobuzClient:
         return {type_name: retval}
 
 
-async def get_client(config: QobuzConfig) -> QobuzClient:
-    bundle = Bundle()
+async def _init_client(
+    config: QobuzConfig, app_id: str, secrets: list
+) -> QobuzClient:
+    """Build, authenticate, and validate a client against the given creds.
 
-    app_id = bundle.get_app_id()
-    secrets = [secret for secret in bundle.get_secrets().values() if secret]
+    Raises ``AuthenticationError`` if the user token is bad (a config
+    problem) and ``InvalidAppSecretError`` if the app id / secret are stale
+    (the signal to refresh the bundle)."""
     client = QobuzClient(app_id, secrets)
     client.auth(config.user_auth_token)
     await client.load_user_info()
     await client.cfg_setup()
+    return client
+
+
+async def get_client(config: QobuzConfig) -> QobuzClient:
+    # Fast path: reuse the previously-validated app id + secret so we skip the
+    # slow web-bundle download. cfg_setup() re-validates the cached secret
+    # against the live API, so a rotated/stale value is caught here.
+    cached = load_cached_bundle()
+    if cached is not None:
+        app_id, secret = cached
+        try:
+            client = await _init_client(config, app_id, [secret])
+            logger.info("Qobuz initialised from cached app id/secret")
+            return client
+        except InvalidAppSecretError:
+            # Only the app creds are stale (a bad *user token* surfaces as
+            # AuthenticationError and propagates — re-fetching wouldn't help).
+            logger.info(
+                "Cached Qobuz app id/secret rejected by the API; "
+                "refreshing the web bundle"
+            )
+            clear_cached_bundle()
+            # fall through to a fresh fetch
+
+    bundle = Bundle()
+    app_id = bundle.get_app_id()
+    secrets = [secret for secret in bundle.get_secrets().values() if secret]
+    client = await _init_client(config, app_id, secrets)
+    # Persist the secret cfg_setup() just validated, so the next start takes
+    # the fast path above.
+    save_cached_bundle(app_id, client.sec)
     return client
 
 
