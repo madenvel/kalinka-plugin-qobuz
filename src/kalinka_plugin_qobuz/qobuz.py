@@ -70,8 +70,11 @@ class NonStreamable(Exception):
 
 
 class RetryTransport(httpx.AsyncHTTPTransport):
-    def __init__(self, read_retries=3, **kwargs):
+    def __init__(self, read_retries=2, **kwargs):
         super().__init__(**kwargs)
+        # read_retries is the total number of attempts (1 initial + N-1 retries).
+        # Kept low so a request fails fast when the server has no internet —
+        # otherwise the playqueue's resolution slot stays occupied far too long.
         self.read_retries = read_retries
         self.backoff_factor = 0.5
 
@@ -160,10 +163,13 @@ class QobuzClient:
         self.secrets = secrets
         self.id = str(app_id)
         self.session = httpx.AsyncClient(
+            # 2 attempts (1 initial + 1 retry), 3s per attempt. RetryTransport
+            # already retries connect failures, so httpx-level retries=0 avoids
+            # multiplying the worst-case wait.
             transport=RetryTransport(
-                read_retries=3, retries=3, http2=True, http1=False
+                read_retries=2, retries=0, http2=True, http1=False
             ),
-            timeout=5,
+            timeout=3,
         )
         self.session.headers.update(
             {
