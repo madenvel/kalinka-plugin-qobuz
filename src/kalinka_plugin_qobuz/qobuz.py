@@ -174,7 +174,9 @@ class QobuzClient:
             transport=RetryTransport(
                 read_retries=2, retries=0, http2=True, http1=False
             ),
-            timeout=3,
+            # 3s read/write/pool keeps runtime calls fast-failing; connect gets a
+            # longer budget so a slow-to-come-up network doesn't fail startup.
+            timeout=httpx.Timeout(3.0, connect=15.0),
         )
         self.session.headers.update(
             {
@@ -397,9 +399,37 @@ async def get_client(config: QobuzConfig) -> QobuzClient:
 
     client = QobuzClient(app_id, secrets)
     client.auth(config.user_auth_token)
-    await client.load_user_info()
+    await _load_user_info_resilient(client)
     await client.cfg_setup()
     return client
+
+
+# A setup failure disables the plugin for the whole session, so retry the first
+# authenticated call while the network is still coming up at boot.
+_STARTUP_CONNECT_ATTEMPTS = 5
+_STARTUP_CONNECT_BACKOFF = 2.0
+_STARTUP_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+async def _load_user_info_resilient(client: QobuzClient) -> None:
+    import asyncio
+
+    for attempt in range(1, _STARTUP_CONNECT_ATTEMPTS + 1):
+        try:
+            await client.load_user_info()
+            return
+        except _STARTUP_CONNECT_ERRORS as exc:
+            if attempt >= _STARTUP_CONNECT_ATTEMPTS:
+                raise
+            delay = _STARTUP_CONNECT_BACKOFF * attempt
+            logger.warning(
+                "Qobuz startup connect failed (attempt %d/%d): %r; retrying in %.1fs",
+                attempt,
+                _STARTUP_CONNECT_ATTEMPTS,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
 
 async def qobuz_link_retriever(qobuz_client, id, format_id) -> TrackUrl:

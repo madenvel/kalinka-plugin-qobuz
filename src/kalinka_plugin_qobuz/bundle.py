@@ -29,10 +29,14 @@ _BUNDLE_URL_REGEX = re.compile(
     r'<script src="(/resources/\d+\.\d+\.\d+-[a-z]\d{3}/bundle\.js)"></script>'
 )
 
+# bundle.js is several MB and fetched once at startup; give the read a generous
+# budget so a slow link doesn't fail initialization.
+_BUNDLE_TIMEOUT = httpx.Timeout(30.0, connect=15.0)
+
 
 class Bundle:
-    def __init__(self):
-        self._session = httpx.Client(http2=True, timeout=5)
+    def __init__(self, timeout: httpx.Timeout = _BUNDLE_TIMEOUT):
+        self._session = httpx.Client(http2=True, timeout=timeout)
 
         logger.debug("Getting logging page")
         response = self._session.get(f"{_BASE_URL}/login")
