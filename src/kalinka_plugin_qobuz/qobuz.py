@@ -69,6 +69,19 @@ class NonStreamable(Exception):
     pass
 
 
+# Retried: failures that are discovered in milliseconds and are genuinely
+# transient. Timeouts are deliberately NOT here — a timeout has already
+# consumed the full per-attempt budget, and an upstream that just hung is
+# very likely to hang again, so retrying turns one slow request into
+# several (3s became 7.5s worst-case). Timeouts propagate immediately.
+_RETRYABLE_EXCEPTIONS = (
+    httpx.ConnectError,          # refused / unreachable / DNS
+    httpx.ReadError,             # connection reset mid-response
+    httpx.RemoteProtocolError,   # server dropped a keep-alive connection
+    httpx.ProxyError,
+)
+
+
 class RetryTransport(httpx.AsyncHTTPTransport):
     def __init__(self, read_retries=2, **kwargs):
         super().__init__(**kwargs)
@@ -81,37 +94,29 @@ class RetryTransport(httpx.AsyncHTTPTransport):
     async def handle_async_request(self, request) -> httpx.Response:
         import asyncio
 
-        read_retries = 0
-        last_exception = None
-        while read_retries < self.read_retries:
+        attempt = 1
+        while True:
             try:
                 response = await super().handle_async_request(request)
-                if response.status_code >= 500 and response.status_code < 600:
-                    read_retries += 1
-                    await asyncio.sleep(self.backoff_factor * read_retries)
-                    logger.warning(
-                        f"Retry {read_retries} due to status code={response.status_code}"
-                    )
-                    continue
-                return response
-            except (
-                httpx.ProtocolError,
-                httpx.ConnectError,
-                httpx.ReadTimeout,
-                httpx.WriteTimeout,
-                httpx.ConnectTimeout,
-                httpx.ProxyError,
-                httpx.ConnectError,
-                httpx.ReadError,
-            ) as exc:
-                last_exception = exc
-                read_retries += 1
-                await asyncio.sleep(self.backoff_factor * read_retries)
-                logger.warning(f"Retry {read_retries} due to {exc}")
-        # If all retries failed, raise the last exception
-        if last_exception is not None:
-            raise last_exception
-        raise RuntimeError("handle_async_request failed without exception")
+            except _RETRYABLE_EXCEPTIONS as exc:
+                if attempt >= self.read_retries:
+                    raise
+                logger.warning("Retry %d due to %r", attempt, exc)
+                await asyncio.sleep(self.backoff_factor * attempt)
+                attempt += 1
+                continue
+            if 500 <= response.status_code < 600 and attempt < self.read_retries:
+                # Release the connection before retrying; abandoning the
+                # response leaks connection back-pressure under repeated 5xx.
+                await response.aclose()
+                logger.warning(
+                    "Retry %d due to status code=%d", attempt, response.status_code
+                )
+                await asyncio.sleep(self.backoff_factor * attempt)
+                attempt += 1
+                continue
+            # Final attempt's 5xx is returned to the caller, not swallowed.
+            return response
 
 
 # The code below is partially based on the code from
