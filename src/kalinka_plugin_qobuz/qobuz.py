@@ -895,7 +895,7 @@ class QobuzInputModule(InputModule):
                         title=json.loads(tags[i]["name_json"])["en"],
                         can_genre_filter=True,
                         preview_config=Preview(
-                            type=PreviewType.IMAGE_TEXT,
+                            type=PreviewType.TEXT_ONLY,
                             aspect_ratio=1 / 0.475,
                         ),
                     ),
