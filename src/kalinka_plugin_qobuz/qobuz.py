@@ -646,6 +646,7 @@ class QobuzInputModule(InputModule):
                 BrowseItem(
                     id=catalog_id("recent-releases"),
                     name="Recent Releases",
+                    subname="The latest albums added to Qobuz",
                     can_browse=True,
                     can_add=False,
                     catalog=Catalog(
@@ -665,6 +666,7 @@ class QobuzInputModule(InputModule):
                 BrowseItem(
                     id=catalog_id("new-releases"),
                     name="New Releases",
+                    subname="New albums spotlighted by Qobuz's editors",
                     can_browse=True,
                     can_add=False,
                     catalog=Catalog(
@@ -684,6 +686,7 @@ class QobuzInputModule(InputModule):
                 BrowseItem(
                     id=catalog_id("playlist-by-category"),
                     name="Playlist By Category",
+                    subname="Qobuz's curated playlists, grouped by theme",
                     can_browse=True,
                     can_add=False,
                     catalog=Catalog(
@@ -703,6 +706,7 @@ class QobuzInputModule(InputModule):
                 BrowseItem(
                     id=catalog_id("qobuz-playlists"),
                     name="Qobuz Playlists",
+                    subname="Playlists hand-picked by Qobuz's editors",
                     can_browse=True,
                     can_add=False,
                     catalog=Catalog(
@@ -722,6 +726,7 @@ class QobuzInputModule(InputModule):
                 BrowseItem(
                     id=catalog_id("press-awards"),
                     name="Press Awards",
+                    subname="Albums honoured by the music press",
                     can_browse=True,
                     can_add=False,
                     catalog=Catalog(
@@ -742,6 +747,7 @@ class QobuzInputModule(InputModule):
                 BrowseItem(
                     id=catalog_id("most-streamed"),
                     name="Most Streamed",
+                    subname="Qobuz's most-streamed albums right now",
                     can_browse=True,
                     can_add=False,
                     catalog=Catalog(
