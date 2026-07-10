@@ -1,0 +1,98 @@
+name: Release
+
+# Builds the kalinka-plugin-qobuz .deb and publishes it to the GitHub release
+# for a `kalinka-plugin-qobuz-v*` tag.
+#
+# - Triggered automatically when a `kalinka-plugin-qobuz-v*` tag is pushed, or
+#   manually (workflow_dispatch) against an already-existing tag — handy for
+#   publishing a release that was cut by hand.
+# - This plugin is pure Python: the package is architecture-independent
+#   (`_all.deb`), so a single amd64 runner builds the one artifact everyone
+#   installs. No matrix, no container, no native toolchain.
+# - The version comes from git via setuptools_scm (tag_regex in pyproject.toml),
+#   so the checkout fetches full history + tags and builds from the tagged
+#   commit — otherwise the wheel is labelled `…devN+g<sha>`, which
+#   scripts/build_wheel.sh warns about.
+
+on:
+  push:
+    tags:
+      - 'kalinka-plugin-qobuz-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing kalinka-plugin-qobuz-v* tag to build and publish'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git dpkg-dev python3 python3-pip python3-venv
+          # build/setuptools-scm are also installed by scripts/build_wheel.sh,
+          # but pin them here so the environment is explicit.
+          python3 -m pip install --upgrade --break-system-packages build setuptools-scm
+
+      - name: Checkout (tag)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0   # full history + tags so setuptools_scm sees the tag
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build .deb package
+        run: ./scripts/build_deb.sh
+
+      - name: Gather deb and checksum
+        run: |
+          mkdir -p release
+          find . -maxdepth 1 -name 'kalinka-plugin-qobuz_*_all.deb' -exec cp -n {} release/ \;
+          (cd release && sha256sum *.deb > SHA256SUMS)
+          echo "Release assets:"
+          ls -l release/
+          cat release/SHA256SUMS
+
+      - name: Create / update release and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          [ -z "$TAG" ] && TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#kalinka-plugin-qobuz-v}"
+          echo "Publishing $TAG"
+
+          cat > notes.md <<EOF
+          ## Install
+
+          Download \`kalinka-plugin-qobuz_${VERSION}_all.deb\` and install it
+          alongside a compatible Kalinka server:
+
+          \`\`\`sh
+          sudo apt install ./kalinka-plugin-qobuz_${VERSION}_all.deb
+          \`\`\`
+
+          Requires \`kalinka-plugin-sdk (>=1.0)\`. Verify the download with
+          \`sha256sum -c SHA256SUMS --ignore-missing\`.
+          EOF
+
+          # Idempotent: re-runs and builds for a hand-cut release fall through to
+          # the upload step.
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "kalinka-plugin-qobuz $VERSION" \
+              --notes-file notes.md \
+              --generate-notes
+          fi
+          gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --latest --repo "$GITHUB_REPOSITORY"
