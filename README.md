@@ -79,7 +79,7 @@ pytest tests/
 
 ## License
 
-This plugin is released under the GPL-3.0-or-later license.
+This plugin is released under the [Apache License 2.0](LICENSE).
 
 ## Support
 
