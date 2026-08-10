@@ -20,7 +20,16 @@ class QobuzConfig(ModuleConfig):
     __module_icon_color__: ClassVar[str] = "#C9A96A"  # gold
     __preview_fields__: ClassVar[list[str]] = ["format"]
 
-    name: str = Field(default="qobuz", title="Qobuz", frozen=True, exclude=True)
+    name: str = Field(
+        default="qobuz",
+        title="Qobuz",
+        description=(
+            "Streaming from a Qobuz subscription, up to studio-quality "
+            "hi-res. Needs your Qobuz account token."
+        ),
+        frozen=True,
+        exclude=True,
+    )
     user_auth_token: str = Field(
         default="",
         title="User auth token",
@@ -29,10 +38,14 @@ class QobuzConfig(ModuleConfig):
             "play.qobuz.com, then copy the token from any authenticated "
             "request header in the browser devtools Network tab."
         ),
-        json_schema_extra={"widget": "password", "importance": "simple"},
+        json_schema_extra={
+            "widget": "password",
+            "importance": "simple",
+            "setup": "required",
+        },
     )
     format: QobuzAudioFormat = Field(
         default=QobuzAudioFormat.HIRES_192,
         title="Audio quality",
-        json_schema_extra={"importance": "simple"},
+        json_schema_extra={"importance": "simple", "setup": "prompt"},
     )

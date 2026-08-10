@@ -29,9 +29,6 @@ class KalinkaPluginQobuz(InputModulePlugin):
         self.interface: Optional[InputModule] = None
         self._qobuz_tasks = None
 
-    def module_name(self) -> str:
-        return "Qobuz Input Module"
-
     def get_interface(self) -> Optional[InputModule]:
         return self.interface
 
