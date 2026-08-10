@@ -71,7 +71,24 @@ jobs:
           VERSION="${TAG#kalinka-plugin-qobuz-v}"
           echo "Publishing $TAG"
 
-          cat > notes.md <<EOF
+          # Curated notes for this version, if CHANGELOG.md has a section for
+          # it. Missing section = install text only, plus the generated commit
+          # list below, so a release never blocks on the changelog.
+          : > notes.md
+          if [ -f CHANGELOG.md ]; then
+            awk -v want="## $VERSION" '
+              $0 == want { found = 1; next }
+              /^## / { found = 0 }
+              found
+            ' CHANGELOG.md >> notes.md
+          fi
+          if [ -s notes.md ]; then
+            printf '\n' >> notes.md
+          else
+            echo "No CHANGELOG.md section for $VERSION — publishing install notes only"
+          fi
+
+          cat >> notes.md <<EOF
           ## Install
 
           Download \`kalinka-plugin-qobuz_${VERSION}_all.deb\` and install it
