@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import hashlib
 import json
@@ -379,15 +380,23 @@ class QobuzClient:
         return {type_name: retval}
 
 
+# Covers the bundle's own HTTP timeouts (two requests at 15s connect + 30s
+# read) with headroom; only an untimed hang (DNS) should ever trip it.
+_BUNDLE_DEADLINE_S = 120.0
+
+
 async def get_client(config: QobuzConfig) -> QobuzClient:
     # Fetching and parsing the play.qobuz.com web bundle (a multi-megabyte
     # download from which the app id + signing secrets are scraped) is a
     # synchronous, network-bound step and the slowest part of Qobuz startup.
-    # Bracket it with explicit INFO logs so the server log makes it obvious
-    # when this blocking phase starts, finishes, and how long it took.
+    # It runs in a worker thread so the event loop stays live, with a deadline
+    # because getaddrinfo has no timeout of its own — a blackholed DNS server
+    # would otherwise stall setup indefinitely.
     logger.info("Loading Qobuz web bundle (app id + secrets)...")
     bundle_start = time.monotonic()
-    bundle = Bundle()
+    bundle = await asyncio.wait_for(
+        asyncio.to_thread(Bundle), timeout=_BUNDLE_DEADLINE_S
+    )
     app_id = bundle.get_app_id()
     secrets = [secret for secret in bundle.get_secrets().values() if secret]
     logger.info(
@@ -412,8 +421,6 @@ _STARTUP_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 
 
 async def _load_user_info_resilient(client: QobuzClient) -> None:
-    import asyncio
-
     for attempt in range(1, _STARTUP_CONNECT_ATTEMPTS + 1):
         try:
             await client.load_user_info()
