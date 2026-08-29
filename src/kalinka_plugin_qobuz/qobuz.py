@@ -10,7 +10,7 @@ from typing import List, Optional
 import httpx
 from pydantic import BaseModel, PositiveInt
 
-from .bundle import Bundle
+from .bundle import load_bundle
 from .config_model import QobuzAudioFormat, QobuzConfig
 
 from kalinka_plugin_sdk.datamodel import (
@@ -380,23 +380,13 @@ class QobuzClient:
         return {type_name: retval}
 
 
-# Covers the bundle's own HTTP timeouts (two requests at 15s connect + 30s
-# read) with headroom; only an untimed hang (DNS) should ever trip it.
-_BUNDLE_DEADLINE_S = 120.0
-
-
 async def get_client(config: QobuzConfig) -> QobuzClient:
-    # Fetching and parsing the play.qobuz.com web bundle (a multi-megabyte
-    # download from which the app id + signing secrets are scraped) is a
-    # synchronous, network-bound step and the slowest part of Qobuz startup.
-    # It runs in a worker thread so the event loop stays live, with a deadline
-    # because getaddrinfo has no timeout of its own — a blackholed DNS server
-    # would otherwise stall setup indefinitely.
+    # The web-bundle fetch is the slowest part of Qobuz startup; bracket it
+    # with explicit INFO logs so the server log makes it obvious when this
+    # phase starts, finishes, and how long it took.
     logger.info("Loading Qobuz web bundle (app id + secrets)...")
     bundle_start = time.monotonic()
-    bundle = await asyncio.wait_for(
-        asyncio.to_thread(Bundle), timeout=_BUNDLE_DEADLINE_S
-    )
+    bundle = await load_bundle()
     app_id = bundle.get_app_id()
     secrets = [secret for secret in bundle.get_secrets().values() if secret]
     logger.info(
