@@ -40,7 +40,10 @@ class _FakeClient:
 
 @pytest.fixture
 def _stub_network(monkeypatch):
-    monkeypatch.setattr(qobuz, "Bundle", _FakeBundle)
+    async def fake_load_bundle():
+        return _FakeBundle()
+
+    monkeypatch.setattr(qobuz, "load_bundle", fake_load_bundle)
     monkeypatch.setattr(qobuz, "QobuzClient", _FakeClient)
 
 

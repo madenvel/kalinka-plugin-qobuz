@@ -1,7 +1,9 @@
 # The code below is based on qobuz-dl package
 # Authored by vitiko98, modified by qwerzl
 
+import asyncio
 import base64
+import contextlib
 import logging
 import re
 from collections import OrderedDict
@@ -33,27 +35,20 @@ _BUNDLE_URL_REGEX = re.compile(
 # budget so a slow link doesn't fail initialization.
 _BUNDLE_TIMEOUT = httpx.Timeout(30.0, connect=15.0)
 
+# Covers the fetch's own HTTP timeouts (two requests at 15s connect + 30s
+# read) with headroom; only an untimed hang (DNS) should ever trip it.
+_BUNDLE_DEADLINE_S = 120.0
+
+# On deadline the worker is aborted by closing its session; give it a moment
+# to notice before it is abandoned to the resolver's own give-up time.
+_ABORT_GRACE_S = 5.0
+
 
 class Bundle:
-    def __init__(self, timeout: httpx.Timeout = _BUNDLE_TIMEOUT):
-        self._session = httpx.Client(http2=True, timeout=timeout)
+    """Parsed play.qobuz.com web bundle; scrapes the app id and secrets."""
 
-        logger.debug("Getting logging page")
-        response = self._session.get(f"{_BASE_URL}/login")
-        response.raise_for_status()
-
-        bundle_url_match = _BUNDLE_URL_REGEX.search(response.text)
-        if not bundle_url_match:
-            raise NotImplementedError("Bundle URL found")
-
-        bundle_url = bundle_url_match.group(1)
-
-        logger.debug("Getting bundle")
-        response = self._session.get(_BASE_URL + bundle_url)
-        response.raise_for_status()
-
-        self._bundle = response.text
-        self._session.close()
+    def __init__(self, bundle_text: str):
+        self._bundle = bundle_text
 
     def get_app_id(self):
         match = _APP_ID_REGEX.search(self._bundle)
@@ -85,3 +80,46 @@ class Bundle:
                 "".join(secrets[secret_pair])[:-44]
             ).decode("utf-8")
         return secrets
+
+
+def fetch_bundle(session: httpx.Client) -> Bundle:
+    """Synchronous, network-bound; the caller owns the session's lifetime."""
+    logger.debug("Getting logging page")
+    response = session.get(f"{_BASE_URL}/login")
+    response.raise_for_status()
+
+    bundle_url_match = _BUNDLE_URL_REGEX.search(response.text)
+    if not bundle_url_match:
+        raise NotImplementedError("Bundle URL found")
+
+    bundle_url = bundle_url_match.group(1)
+
+    logger.debug("Getting bundle")
+    response = session.get(_BASE_URL + bundle_url)
+    response.raise_for_status()
+
+    return Bundle(response.text)
+
+
+async def load_bundle(deadline_s: float = _BUNDLE_DEADLINE_S) -> Bundle:
+    """Fetch and parse the web bundle without blocking the event loop.
+
+    The sync fetch runs in a worker thread under a deadline, needed because
+    getaddrinfo has no timeout of its own — a blackholed DNS server would
+    otherwise stall setup indefinitely. On deadline (or cancellation) the
+    shared session is closed, which unblocks a worker stuck in connect/read
+    so it exits promptly; only a hung resolver call itself cannot be
+    interrupted, and then the worker is abandoned to the resolver's own
+    give-up time.
+    """
+    session = httpx.Client(http2=True, timeout=_BUNDLE_TIMEOUT)
+    worker = asyncio.create_task(asyncio.to_thread(fetch_bundle, session))
+    try:
+        return await asyncio.wait_for(asyncio.shield(worker), timeout=deadline_s)
+    except (TimeoutError, asyncio.CancelledError):
+        session.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(worker, timeout=_ABORT_GRACE_S)
+        raise
+    finally:
+        session.close()
