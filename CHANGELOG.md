@@ -2,6 +2,13 @@
 
 Curated, user-facing notes per release. Add a `## <version>` section before tagging — the release workflow puts the matching section into the GitHub Release body.
 
+## 3.0.0
+
+### Changed
+- **Requires Kalinka plugin SDK 2.0 or newer, and a server built against it.** The SDK changed how a track says where its audio comes from, and this release follows that change. It will not load on an older server, and an older Qobuz plugin will not load on a new one — upgrade the server and the plugin together.
+
+Playback itself is unchanged: Qobuz still signs a URL per play and your renderer still fetches the audio straight from Qobuz, not through the Kalinka server.
+
 ## 2.3.0
 
 ### Changed

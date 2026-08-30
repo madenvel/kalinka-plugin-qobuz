@@ -37,10 +37,11 @@ from kalinka_plugin_sdk.datamodel import (
     Track,
 )
 from kalinka_plugin_sdk.inputmodule import (
+    DirectUrl,
     InputModule,
     SearchType,
     TrackInfo,
-    TrackUrl,
+    TrackSource,
 )
 
 logger = logging.getLogger(__name__.split(".")[-1])
@@ -429,10 +430,13 @@ async def _load_user_info_resilient(client: QobuzClient) -> None:
             await asyncio.sleep(delay)
 
 
-async def qobuz_link_retriever(qobuz_client, id, format_id) -> TrackUrl:
+async def qobuz_source_retriever(qobuz_client, id, format_id) -> TrackSource:
+    # Qobuz issues a time-limited URL the renderer fetches for itself; the
+    # server has no copy of the file to serve in its place.
     track = await qobuz_client.get_track_url(id, fmt_id=format_id)
-    track_url = TrackUrl(url=track["url"], format=track["mime_type"])
-    return track_url
+    return TrackSource(
+        source=DirectUrl(url=track["url"]), format=track["mime_type"]
+    )
 
 
 def append_str(s1: str, s2: str) -> str:
@@ -942,14 +946,14 @@ class QobuzInputModule(InputModule):
         return [self._track_to_track_info(track) for track in all_tracks]
 
     def _track_to_track_info(self, track):
-        async def async_link_retriever():
-            return await qobuz_link_retriever(
+        async def async_source_retriever():
+            return await qobuz_source_retriever(
                 self.qobuz_client, track["id"], self.format_id
             )
 
         track_info = TrackInfo(
             id=track_id(str(track["id"])),
-            link_retriever=async_link_retriever,
+            source_retriever=async_source_retriever,
             metadata=metadata_from_track(track),
         )
 
