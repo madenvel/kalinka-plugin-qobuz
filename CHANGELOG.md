@@ -2,6 +2,14 @@
 
 Curated, user-facing notes per release. Add a `## <version>` section before tagging — the release workflow puts the matching section into the GitHub Release body.
 
+## 2.3.0
+
+### Changed
+- The web bundle download during Qobuz startup no longer blocks the server's event loop, so everything else stays responsive while Qobuz starts.
+- That download now runs under a two-minute deadline: a network black hole (such as a DNS server that never answers) fails Qobuz startup with a clear error instead of stalling it indefinitely.
+
+Nothing about playback, authentication or catalogue browsing changed in this release.
+
 ## 2.2.0
 
 ### Added
