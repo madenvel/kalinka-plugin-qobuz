@@ -27,7 +27,6 @@ from kalinka_plugin_sdk.datamodel import (
     EntityType,
     FavoriteIds,
     Genre,
-    GenreList,
     Label,
     Owner,
     Playlist,
@@ -35,6 +34,15 @@ from kalinka_plugin_sdk.datamodel import (
     PreviewContentType,
     PreviewType,
     Track,
+)
+from kalinka_plugin_sdk.filters import (
+    FilterKind,
+    FilterOp,
+    FilterQuery,
+    FilterSpec,
+    FilterValue,
+    FilterValueList,
+    UnsupportedFilter,
 )
 from kalinka_plugin_sdk.inputmodule import (
     DirectUrl,
@@ -143,6 +151,50 @@ def playlist_id(id: str) -> EntityId:
 
 def label_id(id: str) -> EntityId:
     return EntityId(id=id, type=EntityType.LABEL, source="qobuz")
+
+
+# Above the taxonomy's size, so one request holds all of it.
+GENRE_PAGE = 500
+
+# Qobuz's featured endpoints take genre_ids and union them; they offer no text
+# parameter, so those shelves declare genre alone.
+GENRE_FILTER = FilterSpec(
+    id="genre",
+    kind=FilterKind.VALUES,
+    label="Genre",
+    ops=[FilterOp.ANY],
+)
+
+GENRE_FILTERABLE = {
+    "recent-releases",
+    "new-releases",
+    "playlist-by-category",
+    "qobuz-playlists",
+    "press-awards",
+    "most-streamed",
+}
+
+
+def _catalog_filters(endpoint: str) -> List[FilterSpec]:
+    """What a shelf can be filtered by. Playlist categories are
+    ``playlist-by-category_<slug>`` and filter like their parent."""
+    base = endpoint.split("_")[0]
+    return [GENRE_FILTER] if base in GENRE_FILTERABLE else []
+
+
+def _genre_values(endpoint: str, filter: FilterQuery) -> List[str]:
+    """The selected genre ids, refusing what this shelf never offered."""
+    declared = {spec.id for spec in _catalog_filters(endpoint)}
+    filter.reject_undeclared(declared)
+
+    genres = filter.values("genre") if "genre" in declared else None
+    if not genres:
+        return []
+    if genres.all or genres.none:
+        raise UnsupportedFilter(
+            "genre", "this source can only match any of the genres given"
+        )
+    return list(genres.any)
 
 
 def genre_id(id: str) -> EntityId:
@@ -515,18 +567,22 @@ class QobuzInputModule(InputModule):
         entity_id: EntityId,
         offset: PositiveInt = 0,
         limit: PositiveInt = 50,
-        genre_ids: List[EntityId] = [],
+        filter: FilterQuery = FilterQuery({}),
     ) -> BrowseItemList:
+        if entity_id.type == EntityType.CATALOG:
+            return await self._browse_catalog(
+                entity_id.id, offset=offset, limit=limit, filter=filter
+            )
+
+        # An album, artist or playlist listing declares no filters, so any
+        # field sent to one is refused rather than dropped.
+        filter.reject_undeclared(())
         if entity_id.type == EntityType.ALBUM:
             return await self._browse_album(entity_id.id, offset, limit)
         elif entity_id.type == EntityType.PLAYLIST:
             return await self._browse_playlist(entity_id.id, offset, limit)
         elif entity_id.type == EntityType.ARTIST:
             return await self._browse_artist(entity_id.id, offset, limit)
-        elif entity_id.type == EntityType.CATALOG:
-            return await self._browse_catalog(
-                entity_id.id, offset=offset, limit=limit, genre_ids=genre_ids
-            )
         else:
             return EmptyList(offset, limit)
 
@@ -640,8 +696,10 @@ class QobuzInputModule(InputModule):
         endpoint: str,
         offset: int = 0,
         limit: int = 50,
-        genre_ids: List[EntityId] = [],
+        filter: FilterQuery = FilterQuery({}),
     ) -> BrowseItemList:
+        genre_ids = _genre_values(endpoint, filter)
+
         if endpoint == "root":
             all_items = [
                 BrowseItem(
@@ -653,7 +711,7 @@ class QobuzInputModule(InputModule):
                     catalog=Catalog(
                         id=catalog_id("recent-releases"),
                         title="Recent Releases",
-                        can_genre_filter=True,
+                        filters=[GENRE_FILTER],
                         preview_config=Preview(
                             type=PreviewType.CAROUSEL,
                             content_type=PreviewContentType.ALBUM,
@@ -673,7 +731,7 @@ class QobuzInputModule(InputModule):
                     catalog=Catalog(
                         id=catalog_id("new-releases"),
                         title="New Releases",
-                        can_genre_filter=True,
+                        filters=[GENRE_FILTER],
                         preview_config=Preview(
                             type=PreviewType.IMAGE_TEXT,
                             content_type=PreviewContentType.ALBUM,
@@ -693,7 +751,7 @@ class QobuzInputModule(InputModule):
                     catalog=Catalog(
                         id=catalog_id("playlist-by-category"),
                         title="Playlist By Category",
-                        can_genre_filter=True,
+                        filters=[GENRE_FILTER],
                         preview_config=Preview(
                             type=PreviewType.TEXT_ONLY,
                             content_type=PreviewContentType.CATALOG,
@@ -713,7 +771,7 @@ class QobuzInputModule(InputModule):
                     catalog=Catalog(
                         id=catalog_id("qobuz-playlists"),
                         title="Qobuz Playlists",
-                        can_genre_filter=True,
+                        filters=[GENRE_FILTER],
                         preview_config=Preview(
                             type=PreviewType.IMAGE_TEXT,
                             content_type=PreviewContentType.PLAYLIST,
@@ -733,7 +791,7 @@ class QobuzInputModule(InputModule):
                     catalog=Catalog(
                         id=catalog_id("press-awards"),
                         title="Press Awards",
-                        can_genre_filter=True,
+                        filters=[GENRE_FILTER],
                         preview_config=Preview(
                             type=PreviewType.IMAGE_TEXT,
                             content_type=PreviewContentType.ALBUM,
@@ -754,7 +812,7 @@ class QobuzInputModule(InputModule):
                     catalog=Catalog(
                         id=catalog_id("most-streamed"),
                         title="Top Releases",
-                        can_genre_filter=True,
+                        filters=[GENRE_FILTER],
                         preview_config=Preview(
                             type=PreviewType.IMAGE_TEXT,
                             content_type=PreviewContentType.ALBUM,
@@ -814,7 +872,7 @@ class QobuzInputModule(InputModule):
         return EmptyList(offset, limit)
 
     async def _get_new_releases(
-        self, type: str, offset: int, limit: int, genre_ids: list[EntityId]
+        self, type: str, offset: int, limit: int, genre_ids: List[str]
     ) -> BrowseItemList:
         response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "/album/getFeatured",
@@ -822,7 +880,7 @@ class QobuzInputModule(InputModule):
                 "type": type,
                 "offset": offset,
                 "limit": limit,
-                "genre_ids": ",".join([str(genre_id.id) for genre_id in genre_ids]),
+                "genre_ids": ",".join(genre_ids),
             },
         )
 
@@ -842,7 +900,7 @@ class QobuzInputModule(InputModule):
         self,
         offset: int,
         limit: int,
-        genre_ids: list[EntityId],
+        genre_ids: List[str],
         tags: str | None = None,
     ):
         response = await self.qobuz_client.session.get(
@@ -851,7 +909,7 @@ class QobuzInputModule(InputModule):
                 "type": "editor-picks",
                 "offset": offset,
                 "limit": limit,
-                "genre_ids": ",".join([str(genre_id.id) for genre_id in genre_ids]),
+                "genre_ids": ",".join(genre_ids),
                 "tags": tags,
             },
         )
@@ -878,7 +936,7 @@ class QobuzInputModule(InputModule):
             params={
                 "offset": offset,
                 "limit": limit,
-                "genre_ids": ",".join([str(genre_id.id) for genre_id in genre_ids]),
+                "genre_ids": ",".join(genre_ids),
             },
         )
 
@@ -900,7 +958,7 @@ class QobuzInputModule(InputModule):
                     catalog=Catalog(
                         id=catalog_id("playlist-by-category_" + tags[i]["slug"]),
                         title=json.loads(tags[i]["name_json"])["en"],
-                        can_genre_filter=True,
+                        filters=[GENRE_FILTER],
                         preview_config=Preview(
                             type=PreviewType.TEXT_ONLY,
                             aspect_ratio=1 / 0.475,
@@ -1084,7 +1142,6 @@ class QobuzInputModule(InputModule):
                         catalog=Catalog(
                             id=artist_id(str(artist["id"])),
                             title="Albums",
-                            can_genre_filter=False,
                             preview_config=Preview(
                                 type=PreviewType.TILE,
                                 content_type=PreviewContentType.ALBUM,
@@ -1103,7 +1160,6 @@ class QobuzInputModule(InputModule):
                         catalog=Catalog(
                             id=catalog_id("similar-artists_" + str(artist["id"])),
                             title="Similar artists",
-                            can_genre_filter=False,
                             preview_config=Preview(
                                 type=PreviewType.IMAGE_TEXT,
                                 content_type=PreviewContentType.ARTIST,
@@ -1159,7 +1215,6 @@ class QobuzInputModule(InputModule):
                         catalog=Catalog(
                             id=album_id(str(album["id"])),
                             title="Tracks",
-                            can_genre_filter=False,
                             preview_config=Preview(
                                 type=PreviewType.TILE_NUMBERED,
                                 content_type=PreviewContentType.TRACK,
@@ -1180,7 +1235,6 @@ class QobuzInputModule(InputModule):
                                 catalog=Catalog(
                                     id=artist.id,
                                     title="More from this artist",
-                                    can_genre_filter=False,
                                     preview_config=Preview(
                                         type=PreviewType.IMAGE_TEXT,
                                         content_type=PreviewContentType.ALBUM,
@@ -1203,7 +1257,6 @@ class QobuzInputModule(InputModule):
                         catalog=Catalog(
                             id=catalog_id("album-suggestions_" + str(album["id"])),
                             title="You may also like",
-                            can_genre_filter=False,
                             preview_config=Preview(
                                 type=PreviewType.IMAGE_TEXT,
                                 content_type=PreviewContentType.ALBUM,
@@ -1256,7 +1309,6 @@ class QobuzInputModule(InputModule):
                         catalog=Catalog(
                             id=playlist_id(str(playlist["id"])),
                             title="Tracks",
-                            can_genre_filter=False,
                             preview_config=Preview(
                                 type=PreviewType.TILE,
                                 content_type=PreviewContentType.TRACK,
@@ -1277,7 +1329,6 @@ class QobuzInputModule(InputModule):
                                 "playlist-suggestions_" + str(playlist["id"])
                             ),
                             title="Similar playlists",
-                            can_genre_filter=False,
                             preview_config=Preview(
                                 type=PreviewType.IMAGE_TEXT,
                                 content_type=PreviewContentType.PLAYLIST,
@@ -1385,26 +1436,38 @@ class QobuzInputModule(InputModule):
         if "status" not in rjson or rjson["status"] != "success":
             raise Exception(f"Failed to remove from favorite: {response.text}")
 
-    async def list_genre(self, offset: int, limit: int) -> GenreList:
-        endpoint = "genre/list"
-        response = await self.qobuz_client.session.get(
-            self.qobuz_client.base + endpoint
-        )
+    async def list_filter_values(
+        self,
+        catalog_id: EntityId,
+        field: str,
+        offset: int = 0,
+        limit: int = 50,
+        q: str = "",
+    ) -> FilterValueList:
+        if field != "genre" or not _catalog_filters(catalog_id.id):
+            raise UnsupportedFilter(field, "no such vocabulary here")
 
+        # Asked for whole: the taxonomy is a few dozen entries, and narrowing
+        # by label has to see all of them to page the result truthfully.
+        response = await self.qobuz_client.session.get(
+            self.qobuz_client.base + "genre/list",
+            params={"limit": GENRE_PAGE},
+        )
         response.raise_for_status()
 
-        rjson = response.json()
-
-        return GenreList(
+        needle = q.casefold()
+        matching = [
+            genre
+            for genre in response.json()["genres"]["items"]
+            if needle in genre["name"].casefold()
+        ]
+        return FilterValueList(
             offset=offset,
             limit=limit,
-            total=rjson["genres"]["total"],
+            total=len(matching),
             items=[
-                Genre(
-                    id=genre_id(str(genre["id"])),
-                    name=genre["name"],
-                )
-                for genre in rjson["genres"]["items"]
+                FilterValue(id=str(genre["id"]), name=genre["name"])
+                for genre in matching[offset : offset + limit]
             ],
         )
 
