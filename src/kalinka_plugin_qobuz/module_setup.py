@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__.split(".")[-1])
 
 
 class KalinkaPluginQobuz(InputModulePlugin):
-    REQUIRES_SDK = ">=2,<3"
+    REQUIRES_SDK = ">=3,<4"
     PLUGIN_ID = "qobuz"
     CONFIG_MODEL = QobuzConfig
 
