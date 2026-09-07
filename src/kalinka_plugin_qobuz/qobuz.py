@@ -36,6 +36,7 @@ from kalinka_plugin_sdk.datamodel import (
     Track,
 )
 from kalinka_plugin_sdk.filters import (
+    or_unfiltered,
     FilterKind,
     FilterOp,
     FilterQuery,
@@ -525,10 +526,12 @@ def metadata_from_track(track, album_meta={}):
                     id=label_id(str(album_info["label"]["id"])),
                     name=album_info["label"]["name"],
                 ),
-                genre=Genre(
-                    id=genre_id(str(album_info["genre"]["id"])),
-                    name=album_info["genre"]["name"],
-                ),
+                genres=[
+                    Genre(
+                        id=genre_id(str(album_info["genre"]["id"])),
+                        name=album_info["genre"]["name"],
+                    )
+                ],
             ),
             "replaygain_peak": track.get("audio_info", {}).get(
                 "replaygain_track_peak", None
@@ -567,8 +570,9 @@ class QobuzInputModule(InputModule):
         entity_id: EntityId,
         offset: PositiveInt = 0,
         limit: PositiveInt = 50,
-        filter: FilterQuery = FilterQuery({}),
+        filter: Optional[FilterQuery] = None,
     ) -> BrowseItemList:
+        filter = or_unfiltered(filter)
         if entity_id.type == EntityType.CATALOG:
             return await self._browse_catalog(
                 entity_id.id, offset=offset, limit=limit, filter=filter
@@ -696,9 +700,9 @@ class QobuzInputModule(InputModule):
         endpoint: str,
         offset: int = 0,
         limit: int = 50,
-        filter: FilterQuery = FilterQuery({}),
+        filter: Optional[FilterQuery] = None,
     ) -> BrowseItemList:
-        genre_ids = _genre_values(endpoint, filter)
+        genre_ids = _genre_values(endpoint, or_unfiltered(filter))
 
         if endpoint == "root":
             all_items = [
@@ -929,7 +933,7 @@ class QobuzInputModule(InputModule):
         )
 
     async def _get_playists_by_category(
-        self, offset: int, limit: int, genre_ids: List[EntityId]
+        self, offset: int, limit: int, genre_ids: List[str]
     ):
         response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "/playlist/getTags",
@@ -1201,10 +1205,12 @@ class QobuzInputModule(InputModule):
                     ),
                     duration=album["duration"],
                     track_count=album.get("track_count", album.get("tracks_count", 0)),
-                    genre=Genre(
-                        id=genre_id(str(album["genre"]["id"])),
-                        name=album["genre"]["name"],
-                    ),
+                    genres=[
+                        Genre(
+                            id=genre_id(str(album["genre"]["id"])),
+                            name=album["genre"]["name"],
+                        )
+                    ],
                 ),
                 sections=[
                     BrowseItem(
