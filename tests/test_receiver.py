@@ -156,6 +156,30 @@ async def test_a_failing_handler_answers_500_without_details():
 
 
 @pytest.mark.asyncio
+async def test_a_handoff_that_stops_the_endpoint_is_still_answered():
+    """Linking an account closes the endpoint while the app awaits the handoff's answer."""
+    stopping = []
+
+    class _Linking(_Handlers):
+        async def handoff(self, body):
+            stopping.append(asyncio.create_task(receiver.stop()))
+            # Long enough for a stop that does not wait to close this connection.
+            await asyncio.sleep(0.05)
+            return await super().handoff(body)
+
+    receiver = HandoffReceiver(_Linking(), host="127.0.0.1", port=0)
+    await receiver.start()
+    async with httpx.AsyncClient() as http:
+        response = await http.post(
+            f"http://127.0.0.1:{receiver.port}/streamcore/connect-to-qconnect",
+            content=handoff_body(),
+        )
+    await stopping[0]
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_stop_closes_the_port():
     receiver = HandoffReceiver(_Handlers(), host="127.0.0.1", port=0)
     await receiver.start()
