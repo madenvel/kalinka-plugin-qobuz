@@ -276,7 +276,9 @@ class QobuzClient:
         )
         if r.status_code == 401:
             raise AuthenticationError("Invalid or expired Qobuz user auth token.")
-        r.raise_for_status()
+        if r.is_error:
+            # Not raise_for_status(): its message quotes the URL, token and all.
+            raise AuthenticationError(f"Qobuz login failed: HTTP {r.status_code}")
         usr_info = r.json()
         if not usr_info["user"]["credential"]["parameters"]:
             raise IneligibleError("Free accounts are not eligible to play tracks.")
