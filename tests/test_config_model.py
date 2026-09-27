@@ -20,6 +20,11 @@ def test_unpair_is_a_one_shot_switch_that_starts_off():
     assert QobuzConfig().unpair is False
 
 
+def test_the_device_name_is_a_regular_setting_and_the_port_an_expert_one():
+    assert _extra("connect_device_name")["importance"] == "simple"
+    assert "importance" not in _extra("connect_port")
+
+
 def test_pairing_defaults():
     config = QobuzConfig()
 
