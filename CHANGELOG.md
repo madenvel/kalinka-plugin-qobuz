@@ -12,13 +12,14 @@ Curated, user-facing notes per release. Add a `## <version>` section before tagg
 - Qobuz's startup checks no longer rely on one fixed test track, which can disappear from the catalogue or a region; they use a track from current new releases.
 
 ### Added
-- **Play from the Qobuz app (Qobuz Connect).** On Kalinka server 5.2 or newer, the linked player is a speaker in the Qobuz app's device picker. Playing on it takes over the output Kalinka plays through; Kalinka's mini player and now-playing screen show the track, its queue screen says the Qobuz Connect queue is playing and Kalinka's is not, and pause, seek, next and previous work from either app. The volume follows both ways: the Qobuz app sets it on whatever controls Kalinka's volume, and a change made in Kalinka or on the device shows in the Qobuz app. The Qobuz app shows the format that plays, and changing its streaming quality switches the playing track to it. Playing from Kalinka's queue takes the output back, and the Qobuz app shows playback stopped. Switching Kalinka's output moves the Qobuz playback along, and a stream that fails is fetched again once, from where it was. On an older server the plugin links as before, and the Qobuz app moves on to another device after a spinner.
+- **Play from the Qobuz app (Qobuz Connect).** The linked player is a speaker in the Qobuz app's device picker. Playing on it takes over the output Kalinka plays through; Kalinka's mini player and now-playing screen show the track, its queue screen says the Qobuz Connect queue is playing and Kalinka's is not, and pause, seek, next and previous work from either app. The volume follows both ways: the Qobuz app sets it on whatever controls Kalinka's volume, and a change made in Kalinka or on the device shows in the Qobuz app. The Qobuz app shows the format that plays, and changing its streaming quality switches the playing track to it. Playing from Kalinka's queue takes the output back, and the Qobuz app shows playback stopped. Switching Kalinka's output moves the Qobuz playback along, and a stream that fails is fetched again once, from where it was.
 - A *Qobuz account* status line in Qobuz's settings: not linked, pairing, linked (with the account), reconnecting, or expired.
 - **Unpair Qobuz account on next restart**, to forget the linked account and pair another. A linked player refuses every other pairing until it is unpaired, across restarts and expiry.
 - If Qobuz issues no user auth token, the app's one-hour token is kept and renews itself before it expires.
 - Expert settings for the name shown in the Qobuz app and for the pairing port.
+- **One command installs or upgrades the plugin.** `scripts/install-latest.sh` fetches the latest release, checks it against the release's checksums and installs it with apt, on a Raspberry Pi or any other Kalinka machine; the README shows how to run it.
 
-Needs Kalinka plugin SDK 3.4 or newer.
+Needs Kalinka server 5.2 or newer, which brings plugin SDK 3.4; the package will not install on an older one.
 
 This is a prototype: the Qobuz Connect protocol is undocumented, and the hourly renewal fallback has not yet run against a real account for days.
 

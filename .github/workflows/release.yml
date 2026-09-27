@@ -88,18 +88,28 @@ jobs:
             echo "No CHANGELOG.md section for $VERSION — publishing install notes only"
           fi
 
+          # The SDK range the package itself declares, so the notes never
+          # disagree with what apt will check.
+          SDK=$(dpkg-deb -f release/*.deb Depends | tr ',' '\n' \
+            | sed -n 's/^ *\(kalinka-plugin-sdk .*\)$/\1/p' | paste -sd, - | sed 's/,/, /g')
+
           cat >> notes.md <<EOF
           ## Install
 
-          Download \`kalinka-plugin-qobuz_${VERSION}_all.deb\` and install it
-          alongside a compatible Kalinka server:
+          On the Kalinka machine, install or upgrade to the latest release with:
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/madenvel/kalinka-plugin-qobuz/main/scripts/install-latest.sh | sudo bash
+          \`\`\`
+
+          Or download \`kalinka-plugin-qobuz_${VERSION}_all.deb\`, verify it with
+          \`sha256sum -c SHA256SUMS --ignore-missing\`, and install it:
 
           \`\`\`sh
           sudo apt install ./kalinka-plugin-qobuz_${VERSION}_all.deb
           \`\`\`
 
-          Requires \`kalinka-plugin-sdk (>=1.0)\`. Verify the download with
-          \`sha256sum -c SHA256SUMS --ignore-missing\`.
+          Requires \`${SDK}\`, which comes with a compatible Kalinka server.
           EOF
 
           # Idempotent: re-runs and builds for a hand-cut release fall through to
@@ -112,4 +122,11 @@ jobs:
               --generate-notes
           fi
           gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
-          gh release edit "$TAG" --latest --repo "$GITHUB_REPOSITORY"
+          # Only the newest version is "latest", which scripts/install-latest.sh
+          # installs: a manual run against an older tag must not take it away.
+          NEWEST=$(git tag --list 'kalinka-plugin-qobuz-v*' --sort=-v:refname | head -n 1)
+          if [ "$TAG" = "$NEWEST" ]; then
+            gh release edit "$TAG" --latest --repo "$GITHUB_REPOSITORY"
+          else
+            echo "$TAG is not the newest tag ($NEWEST); leaving the latest release alone"
+          fi

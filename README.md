@@ -10,56 +10,36 @@ This is an experimental integration with [Qobuz](https://www.qobuz.com), allowin
 
 >**Disclaimer**: This plugin is an independent, community-developed integration and is not affiliated with, endorsed by, or supported by Qobuz or its parent companies. It is provided "as is", without any guarantees or warranties of any kind. Use of this plugin is entirely at your own risk. The author assumes no responsibility or liability for any consequences, including but not limited to potential violations of Qobuz's Terms of Service or any other issues arising from its use.
 
-## Building
-
-### Prerequisites
-- Python 3.10+
-- `kalinka-plugin-sdk` package
-- Build tools: `python3-build`, `setuptools`, `setuptools-scm`, `wheel`
-- For Debian packaging: `dpkg-dev`
-- Git repository with proper tags for version detection
-
-### Version Management
-This plugin uses **setuptools_scm** for automatic version detection:
-- **Release builds**: Tag your release with `kalinka-plugin-kalinka-plugin-qobuz-v1.2.3` format
-- **Development builds**: setuptools_scm automatically generates dev versions like `1.2.4.dev0+gc1e6070.d20250928`
-- **Clean releases**: Commit all changes and tag for clean release versions
-
-### Build Python Wheel
-```bash
-./scripts/build_wheel.sh
-```
-The script automatically:
-- Detects version from git tags using setuptools_scm
-- Generates `_version.py` with the detected version
-- Builds the wheel with proper version metadata
-
-### Build Debian Package
-```bash
-./scripts/build_deb.sh
-```
-The script automatically:
-- Builds the wheel first to detect the version
-- Generates Debian control files with the correct version
-- Creates a `.deb` package ready for installation
-
-The Debian package will:
-1. Install the wheel to `/usr/share/kalinka/plugins/`
-2. Use post-install script to install into Kalinka's venv
-3. Restart Kalinka service if available
-
 ## Installation
 
-### From Wheel
+The plugin installs on a Kalinka server set up from its `.deb` packages: a Raspberry Pi, any other Debian or Ubuntu machine, or a virtual machine. The package is architecture-independent, so the same file installs on all of them. Version 5 of the plugin needs Kalinka server 5.2 or newer.
+
+### With the install script
+
+Run this on the Kalinka machine, over SSH for a Pi:
+
 ```bash
-# Install into Kalinka's venv
-/opt/kalinka/venv/bin/pip install kalinka-plugin-kalinka-plugin-qobuz-*.whl
+curl -fsSL https://raw.githubusercontent.com/madenvel/kalinka-plugin-qobuz/main/scripts/install-latest.sh | sudo bash
 ```
 
-### From Debian Package
+The script finds the latest release, checks the `.deb` against the release's `SHA256SUMS`, and installs it with apt. Kalinka restarts by itself to load the plugin.
+
+Run the same command to upgrade. It does nothing when the latest version is already installed. Nothing upgrades the plugin automatically yet.
+
+If apt says the release needs a newer `kalinka-plugin-sdk`, upgrade Kalinka first, then run the script again.
+
+### By hand
+
+Download `kalinka-plugin-qobuz_<version>_all.deb` and `SHA256SUMS` from the [releases page](https://github.com/madenvel/kalinka-plugin-qobuz/releases). Check the download, then install it with apt, which also checks that the installed Kalinka can load it:
+
 ```bash
-sudo dpkg -i kalinka-plugin-kalinka-plugin-qobuz_*_all.deb
+sha256sum -c SHA256SUMS --ignore-missing
+sudo apt install ./kalinka-plugin-qobuz_<version>_all.deb
 ```
+
+Kalinka restarts by itself to load the plugin. To try a local build, build the `.deb` as described under [Building](#building) and install it the same way.
+
+Then link your Qobuz account, as below.
 
 ## Linking your Qobuz account
 
@@ -70,7 +50,7 @@ The plugin links to your account through the official Qobuz app. There is no tok
 3. Choose Kalinka. The app hands the player a token that lasts an hour. The plugin exchanges it for a regular Qobuz user auth token, the same kind the old *User auth token* setting held, and checks it: it reads your account, favourites, playlists, new releases and a stream URL.
 4. The *Qobuz account* line in Qobuz's settings then reads **Linked**, and you browse and play Qobuz in Kalinka as before.
 
-On Kalinka server 5.2 or newer, the player also joins the Qobuz app's session and becomes the device the app plays on (see [Playing from the Qobuz app](#playing-from-the-qobuz-app)). On an older server, Kalinka shows a spinner in the Qobuz app for a while, then the app switches to another device: the plugin takes only the token. Either way, Kalinka's status line tells you whether linking worked; reopen its settings to see it.
+The player also joins the Qobuz app's session and becomes the device the app plays on (see [Playing from the Qobuz app](#playing-from-the-qobuz-app)). Kalinka's status line tells you whether linking worked; reopen its settings to see it.
 
 ### What the status line means
 
@@ -90,7 +70,7 @@ Until an account is linked, Qobuz reports itself as unavailable (an error badge 
 
 ### Playing from the Qobuz app
 
-With Kalinka server 5.2 or newer, a linked player is a Qobuz Connect speaker. Choose it in the Qobuz app's device picker and press play: the plugin takes over the output Kalinka is playing through and plays the Qobuz app's queue on it.
+A linked player is a Qobuz Connect speaker. Choose it in the Qobuz app's device picker and press play: the plugin takes over the output Kalinka is playing through and plays the Qobuz app's queue on it.
 
 - **Kalinka shows what plays.** The mini player and the now-playing screen show the track, its artwork and position, with Qobuz's badge, and the now-playing screen says Qobuz Connect is controlling playback. The queue screen shows the Qobuz Connect queue is the one playing, managed in the Qobuz app, and lists Kalinka's own queue, kept as it was, as not playing.
 - **Both apps control it.** Pause, seek, next and previous work from either app, and each follows the other. Volume from the Qobuz app goes to whatever controls the output's volume in Kalinka, including an amplifier Kalinka drives, and a change made in Kalinka or on the device itself shows in the Qobuz app.
@@ -113,7 +93,7 @@ A linked player refuses every other pairing attempt, from any phone, until you u
 
 ### Network
 
-Pairing needs mDNS (UDP 5353) and one TCP port, 8183 by default (*Qobuz Connect pairing port*), reachable from the phone over IPv4 on the same LAN. On an older server neither is used once the account is linked; with Qobuz Connect playback both stay open, so the Qobuz app can hand its session over. Playing from the Qobuz app also needs an outbound WebSocket connection to Qobuz.
+Pairing needs mDNS (UDP 5353) and one TCP port, 8183 by default (*Qobuz Connect pairing port*), reachable from the phone over IPv4 on the same LAN. Both stay open once the account is linked, so the Qobuz app can hand its session over. Playing from the Qobuz app also needs an outbound WebSocket connection to Qobuz.
 
 The linked token and the Qobuz Connect session are kept in `/var/lib/kalinka/qobuz/connect.json`, readable only by the Kalinka service user.
 
@@ -127,6 +107,41 @@ The *User auth token* setting is gone. A token saved by an older version is igno
 - User auth tokens have lasted months in practice. If Qobuz does not issue one, the plugin keeps the app's one-hour token and renews it every hour, which has not been proven over days.
 - The Qobuz Connect session token is renewed with the app's one-hour token, so once both have run out the player waits for the Qobuz app to hand them over again: choose the player in the app.
 - Tracks from the Qobuz app are not joined gaplessly yet.
+
+## Building
+
+### Prerequisites
+- Python 3.10+
+- `kalinka-plugin-sdk` package
+- Build tools: `python3-build`, `setuptools`, `setuptools-scm`, `wheel`
+- For Debian packaging: `dpkg-dev`
+- Git repository with proper tags for version detection
+
+### Version Management
+This plugin uses **setuptools_scm** for automatic version detection:
+- **Release builds**: Tag your release with `kalinka-plugin-qobuz-v1.2.3` format
+- **Development builds**: setuptools_scm automatically generates dev versions like `1.2.4.dev0+gc1e6070.d20250928`
+- **Clean releases**: Commit all changes and tag for clean release versions
+
+### Build Python Wheel
+```bash
+./scripts/build_wheel.sh
+```
+The script automatically:
+- Detects version from git tags using setuptools_scm
+- Generates `_version.py` with the detected version
+- Builds the wheel with proper version metadata
+
+### Build Debian Package
+```bash
+./scripts/build_deb.sh
+```
+The script automatically:
+- Builds the wheel first to detect the version
+- Generates Debian control files with the correct version
+- Creates a `.deb` package ready for installation
+
+The Debian package puts the wheel in `/opt/kalinka/wheels/` and tells the Kalinka server, which restarts and installs it into its venv.
 
 ## Live smoke test
 
@@ -147,7 +162,7 @@ Run this on a real player with a Qobuz subscription before releasing. Use throwa
 5. Confirm playback still works after `sudo systemctl restart kalinka`, and again the next day. If the link kept a `bearer` credential, also wait past the first renewal; the log shows the expiry before and after.
 6. Turn on Unpair and apply. Confirm the player is advertised again and that pairing works a second time.
 
-With Kalinka server 5.2 or newer, also check playback from the Qobuz app:
+Then check playback from the Qobuz app:
 
 7. Choose the player in the Qobuz app and play a track. The log shows the cloud connection, the session joined as the active renderer and the renderer id Qobuz gave the player; the Qobuz app shows the player as the active device, and its position advances.
 8. In Kalinka, the mini player shows the track, and the queue screen shows the *Qobuz Connect queue* card above *Saved Kalinka queue · Not playing*. Pause, seek and skip from Kalinka and from the Qobuz app; each app follows the other.
