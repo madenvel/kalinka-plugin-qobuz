@@ -68,9 +68,9 @@ The plugin links to your account through the official Qobuz app. There is no tok
 1. Enable Qobuz in Kalinka's settings. While it is not linked, the player advertises itself on your network as **Kalinka (hostname)**. You can change that name under *Qobuz Connect device name*.
 2. On a phone or computer on the same network, open the Qobuz app and open its device picker, where you would choose a speaker.
 3. Choose Kalinka. The app hands the player a token that lasts an hour. The plugin exchanges it for a regular Qobuz user auth token, the same kind the old *User auth token* setting held, and checks it: it reads your account, favourites, playlists, new releases and a stream URL.
-4. The *Qobuz account* line in Qobuz's settings then reads **Linked**. Kalinka stops advertising, and you browse and play Qobuz in Kalinka as before.
+4. The *Qobuz account* line in Qobuz's settings then reads **Linked**, and you browse and play Qobuz in Kalinka as before.
 
-In the Qobuz app, Kalinka shows a spinner for a while, then the app switches to another device. That is expected: the plugin uses Qobuz Connect only to receive the token and never joins the app's playback session. Kalinka's status line tells you whether linking worked; reopen its settings to see it.
+On Kalinka server 5.2 or newer, the player also joins the Qobuz app's session and becomes the device the app plays on (see [Playing from the Qobuz app](#playing-from-the-qobuz-app)). On an older server, Kalinka shows a spinner in the Qobuz app for a while, then the app switches to another device: the plugin takes only the token. Either way, Kalinka's status line tells you whether linking worked; reopen its settings to see it.
 
 ### What the status line means
 
@@ -88,6 +88,21 @@ The status is read when the settings page opens, so reopen it to see a change.
 
 Until an account is linked, Qobuz reports itself as unavailable (an error badge in the module list) and lists nothing: no shelves, search results, favourites or playlists. Starting and reconnecting with a stored link show as a warning instead, since the link is on its way.
 
+### Playing from the Qobuz app
+
+With Kalinka server 5.2 or newer, a linked player is a Qobuz Connect speaker. Choose it in the Qobuz app's device picker and press play: the plugin takes over the output Kalinka is playing through and plays the Qobuz app's queue on it.
+
+- **Kalinka shows what plays.** The mini player and the now-playing screen show the track, its artwork and position, with Qobuz's badge, and the now-playing screen says Qobuz Connect is controlling playback. The queue screen shows the Qobuz Connect queue is the one playing, managed in the Qobuz app, and lists Kalinka's own queue, kept as it was, as not playing.
+- **Both apps control it.** Pause, seek, next and previous work from either app, and each follows the other. Volume from the Qobuz app goes to whatever controls the output's volume in Kalinka, including an amplifier Kalinka drives, and a change made in Kalinka or on the device itself shows in the Qobuz app.
+- **Kalinka takes the output back when you play from it.** Playing anything from Kalinka's queue stops the Qobuz playback, and the Qobuz app shows it stopped. Stopping from Kalinka does the same without starting the queue. Press play in the Qobuz app to take the output again.
+- **Quality follows both settings.** The stream is the lower of the Qobuz app's streaming quality and this plugin's *Format*. Changing the quality in the Qobuz app applies to the playing track at once, from where it was, and the Qobuz app shows the format that plays and the one the output runs at.
+- **Switching the output takes it along.** Choosing another output in Kalinka moves the Qobuz playback there, carrying on from where it had reached. The Qobuz app briefly shows it buffering.
+- **On Android, the Qobuz app has the media controls.** While the Qobuz app plays on Kalinka, Kalinka's own media notification steps aside, so the Qobuz app's notification and the volume keys control the playback.
+
+The player stays in the Qobuz app's device list while linked. After a restart it rejoins on its own; if the Qobuz session has ended meanwhile, choose the player in the Qobuz app again. The status line has a *Qobuz Connect* line: connecting, available in the device list, selected, or what it is playing.
+
+While linked, the player keeps listening for handoffs so the Qobuz app can hand its session over again. It accepts them only from the linked account.
+
 ### Unpairing
 
 A linked player refuses every other pairing attempt, from any phone, until you unpair it. This also holds after a restart or when the link has expired. To link another account:
@@ -98,9 +113,9 @@ A linked player refuses every other pairing attempt, from any phone, until you u
 
 ### Network
 
-Pairing needs mDNS (UDP 5353) and one TCP port, 8183 by default (*Qobuz Connect pairing port*), reachable from the phone over IPv4 on the same LAN. Neither is used once the account is linked.
+Pairing needs mDNS (UDP 5353) and one TCP port, 8183 by default (*Qobuz Connect pairing port*), reachable from the phone over IPv4 on the same LAN. On an older server neither is used once the account is linked; with Qobuz Connect playback both stay open, so the Qobuz app can hand its session over. Playing from the Qobuz app also needs an outbound WebSocket connection to Qobuz.
 
-The linked token is kept in `/var/lib/kalinka/qobuz/connect.json`, readable only by the Kalinka service user.
+The linked token and the Qobuz Connect session are kept in `/var/lib/kalinka/qobuz/connect.json`, readable only by the Kalinka service user.
 
 ### Upgrading from 4.x or older
 
@@ -108,9 +123,10 @@ The *User auth token* setting is gone. A token saved by an older version is igno
 
 ### Limitations
 
-- This is a prototype. The pairing protocol is not documented by Qobuz and was learnt from other receivers.
+- This is a prototype. The Qobuz Connect protocol is not documented by Qobuz and was learnt from other receivers.
 - User auth tokens have lasted months in practice. If Qobuz does not issue one, the plugin keeps the app's one-hour token and renews it every hour, which has not been proven over days.
-- Kalinka is not a Qobuz Connect speaker. Playback commands from the Qobuz app are not accepted.
+- The Qobuz Connect session token is renewed with the app's one-hour token, so once both have run out the player waits for the Qobuz app to hand them over again: choose the player in the app.
+- Tracks from the Qobuz app are not joined gaplessly yet.
 
 ## Live smoke test
 
@@ -130,6 +146,20 @@ Run this on a real player with a Qobuz subscription before releasing. Use throwa
 4. Send a second handoff, from another phone or with `curl -X POST` and any body. It must be refused with HTTP 400, and the status must not change.
 5. Confirm playback still works after `sudo systemctl restart kalinka`, and again the next day. If the link kept a `bearer` credential, also wait past the first renewal; the log shows the expiry before and after.
 6. Turn on Unpair and apply. Confirm the player is advertised again and that pairing works a second time.
+
+With Kalinka server 5.2 or newer, also check playback from the Qobuz app:
+
+7. Choose the player in the Qobuz app and play a track. The log shows the cloud connection, the session joined as the active renderer and the renderer id Qobuz gave the player; the Qobuz app shows the player as the active device, and its position advances.
+8. In Kalinka, the mini player shows the track, and the queue screen shows the *Qobuz Connect queue* card above *Saved Kalinka queue · Not playing*. Pause, seek and skip from Kalinka and from the Qobuz app; each app follows the other.
+   Change the volume in Kalinka, and on the renderer's host or amplifier; the Qobuz app's volume follows.
+   The Qobuz app shows the format Kalinka shows for the track. Change the streaming quality in the Qobuz app; the track carries on from where it was in the new format.
+9. Play something from Kalinka's queue. The Qobuz app shows playback stopped. Press play in the Qobuz app; it takes the output back.
+10. Let a track end; the next one plays and the Qobuz app follows. At the end of the queue the output goes back to Kalinka.
+11. Switch the Qobuz app to another device; Kalinka stops. Switch back.
+12. Restart the server. The player rejoins as an available device without being chosen again. Leave it overnight and choose it again the next day.
+13. Run the speaker test from Kalinka's settings while the Qobuz app plays; the Qobuz app shows stopped.
+14. Switch Kalinka's output while the Qobuz app plays, and again while paused. Playback carries on from where it was on the new output, paused if it was.
+15. On an Android phone running both apps, Kalinka's media notification disappears while the Qobuz app plays, and the volume keys change the output's volume. Stop from Kalinka; its notification comes back.
 
 ## Development
 

@@ -12,6 +12,7 @@ from kalinka_plugin_sdk.module_health import ModuleHealthState
 from kalinka_plugin_qobuz.account import AccessCheckError, Validated
 from kalinka_plugin_qobuz.auth import AuthenticationError, QobuzAuth, TokenHolder
 from kalinka_plugin_qobuz.connect.pairing import PairingService, Phase
+from kalinka_plugin_qobuz.connect.session_token import SessionToken
 from kalinka_plugin_qobuz.connect.store import LinkState, LinkStore
 from kalinka_plugin_qobuz.qobuz import QobuzClient
 
@@ -25,9 +26,12 @@ from conftest import (
     OTHER_ACCOUNT,
     OTHER_JWT,
     OTHER_UAT,
+    QCONNECT_JWT,
+    RENEWED_QCONNECT_JWT,
     FakeAdvertiser,
     FakeReceiver,
     FakeRefresher,
+    FakeSessionSink,
     assert_no_secrets,
     bearer,
     handoff_body,
@@ -64,8 +68,10 @@ class _Validator:
 
 
 class _Harness:
-    def __init__(self, tmp_path, *, receiver_failure=None, bundle_failures=0):
+    def __init__(self, tmp_path, *, receiver_failure=None, bundle_failures=0, sessions=None):
         FakeRefresher.instances = []
+        self.sessions = sessions
+        self.accounts = {API_JWT: ACCOUNT, OTHER_JWT: OTHER_ACCOUNT}
         self.store = LinkStore(str(tmp_path / "qobuz" / "connect.json"))
         self.holder = TokenHolder()
         self.client = QobuzClient(auth=QobuzAuth(self.holder), transport=_unreachable())
@@ -85,12 +91,17 @@ class _Harness:
             port=8183,
             load_bundle=self._bundle,
             validate=self.validator,
+            identify=self._identify,
+            sessions=self.sessions,
             make_probe_client=lambda holder: QobuzClient(auth=QobuzAuth(holder), transport=_unreachable()),
             make_receiver=self._receiver,
             advertiser=self.advertiser,
             make_refresher=FakeRefresher,
             sleep=self._sleep,
         )
+
+    async def _identify(self, client, credential):
+        return self.accounts[credential.token]
 
     async def _bundle(self):
         if self.bundle_failures:
@@ -476,3 +487,182 @@ async def test_status_text_never_carries_a_token(tmp_path, prepare):
 
     assert_no_secrets(service.status_markdown(), str(service.health()))
     await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_with_connect_playback_pairing_stays_open_and_hands_the_session_over(tmp_path):
+    sink = FakeSessionSink()
+    harness = _Harness(tmp_path, sessions=sink)
+    service = await _waiting(harness)
+
+    await service.handoff(handoff_body())
+    await settle(lambda: service.phase is Phase.LINKED and sink.ready)
+
+    [(session, handed_over)] = sink.ready
+    assert handed_over and session.jwt == QCONNECT_JWT
+    assert session.session_id == "sess-1234-abcd"
+    assert harness.advertiser.running and not harness.receivers[0].stopped
+    stored = harness.store.load_or_create()
+    assert stored.session.jwt == QCONNECT_JWT
+    assert stored.api_bearer.token == API_JWT
+    assert service.connect_info()["current_session_id"] == "sess-1234-abcd"
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_restored_link_hands_its_session_over_and_listens(tmp_path):
+    sink = FakeSessionSink()
+    harness = _Harness(tmp_path, sessions=sink)
+    state = harness.link(credential=uat())
+    harness.store.save(state.with_session(SessionToken(jwt=QCONNECT_JWT, endpoint="wss://q"), None))
+    service = harness.service()
+    service.start()
+    await settle(lambda: harness.advertiser.running)
+
+    assert sink.ready == [(SessionToken(jwt=QCONNECT_JWT, endpoint="wss://q"), False)]
+    assert service.phase is Phase.LINKED
+    assert harness.holder.current() == uat()
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_linked_player_takes_its_accounts_next_session(tmp_path):
+    sink = FakeSessionSink()
+    harness = _Harness(tmp_path, sessions=sink)
+    service = await _waiting(harness)
+    await service.handoff(handoff_body())
+    await settle(lambda: service.phase is Phase.LINKED and sink.ready)
+
+    status, _ = await service.handoff(
+        handoff_body(qconnect_jwt=RENEWED_QCONNECT_JWT, session_id="sess-next")
+    )
+    await settle(lambda: len(sink.ready) == 2)
+
+    assert status == 200
+    session, handed_over = sink.ready[-1]
+    assert handed_over and session.jwt == RENEWED_QCONNECT_JWT
+    assert harness.store.load_or_create().session.jwt == RENEWED_QCONNECT_JWT
+    assert harness.holder.current() == uat()
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_linked_player_refuses_another_accounts_session(tmp_path, caplog):
+    sink = FakeSessionSink()
+    harness = _Harness(tmp_path, sessions=sink)
+    service = await _waiting(harness)
+    await service.handoff(handoff_body())
+    await settle(lambda: service.phase is Phase.LINKED and sink.ready)
+
+    await service.handoff(handoff_body(api_jwt=OTHER_JWT, qconnect_jwt=RENEWED_QCONNECT_JWT))
+    await settle(lambda: "linked to another Qobuz account" in caplog.text)
+
+    assert len(sink.ready) == 1
+    assert harness.store.load_or_create().session.jwt == QCONNECT_JWT
+    assert harness.store.load_or_create().account == ACCOUNT
+    assert_no_secrets(caplog.text)
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_without_connect_playback_a_linked_player_refuses_handoffs(tmp_path):
+    harness = _Harness(tmp_path)
+    service = await _waiting(harness)
+    await service.handoff(handoff_body())
+    await settle(lambda: service.phase is Phase.LINKED)
+
+    status, body = await service.handoff(handoff_body(qconnect_jwt=RENEWED_QCONNECT_JWT))
+
+    assert status == 400 and body == {"error": "device is not accepting pairing"}
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_unpairing_and_expiry_end_the_session(tmp_path):
+    sink = FakeSessionSink()
+    harness = _Harness(tmp_path, sessions=sink)
+    harness.link()
+    service = harness.service()
+
+    service.forget_link()
+
+    assert sink.ended == 1
+
+    harness.link()
+    expiring = harness.service()
+    expiring._link = harness.store.load_or_create()
+    expiring._expire("Qobuz refused the stored link")
+    assert sink.ended == 2
+
+
+@pytest.mark.asyncio
+async def test_an_expired_link_stops_offering_the_player(tmp_path):
+    sink = FakeSessionSink()
+    harness = _Harness(tmp_path, sessions=sink)
+    service = await _waiting(harness)
+    await service.handoff(handoff_body())
+    await settle(lambda: service.phase is Phase.LINKED and sink.ready)
+    assert harness.advertiser.running
+
+    service._expire("Qobuz refused the stored link")
+    await settle(lambda: not harness.advertiser.running and harness.receivers[0].stopped)
+
+    assert service.phase is Phase.EXPIRED
+    assert sink.ended == 1
+    status, _ = await service.handoff(handoff_body())
+    assert status == 400
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_link_that_expires_while_listening_is_retried_is_not_offered(tmp_path):
+    sink = FakeSessionSink()
+    harness = _Harness(tmp_path, sessions=sink, receiver_failure=OSError(98, "Address already in use"))
+    state = harness.link(credential=uat())
+    harness.store.save(state.with_session(SessionToken(jwt=QCONNECT_JWT, endpoint="wss://q"), None))
+    retry = asyncio.Event()
+
+    async def sleep(seconds):
+        harness.sleeps.append(seconds)
+        await retry.wait()
+
+    harness._sleep = sleep
+    service = harness.service()
+    service.start()
+    await settle(lambda: harness.sleeps)
+
+    service._expire("Qobuz refused the stored link")
+    retry.set()
+    await asyncio.sleep(0.05)
+
+    assert len(harness.receivers) == 1
+    assert not harness.advertiser.running
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_api_token_is_offered_only_while_it_lives(tmp_path):
+    harness = _Harness(tmp_path, sessions=FakeSessionSink())
+    service = harness.service()
+
+    harness.holder.install(bearer(API_JWT))
+    assert service.api_bearer() == bearer(API_JWT)
+
+    harness.holder.install(uat())
+    service._link = service.link.with_session(None, bearer(OTHER_JWT, exp=4102444800))
+    assert service.api_bearer() == bearer(OTHER_JWT, exp=4102444800)
+
+    service._link = service.link.with_session(None, bearer(OTHER_JWT, exp=1))
+    assert service.api_bearer() is None
+
+
+@pytest.mark.asyncio
+async def test_a_renewed_session_is_stored(tmp_path):
+    harness = _Harness(tmp_path, sessions=FakeSessionSink())
+    harness.link()
+    service = harness.service()
+
+    service.store_session(SessionToken(jwt=RENEWED_QCONNECT_JWT, endpoint="wss://q", exp=99))
+
+    assert harness.store.load_or_create().session.jwt == RENEWED_QCONNECT_JWT
+    assert harness.store.load_or_create().linked

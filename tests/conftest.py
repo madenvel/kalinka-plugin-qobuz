@@ -29,9 +29,10 @@ API_JWT = make_jwt({"sub": "synthetic-user", "exp": 4102444800, "scope": "api"})
 RENEWED_JWT = make_jwt({"sub": "synthetic-user", "exp": 4102448400, "scope": "api"}, "cmVuZXdlZA")
 OTHER_JWT = make_jwt({"sub": "other-user", "exp": 4102444800, "scope": "api"}, "b3RoZXI")
 QCONNECT_JWT = make_jwt({"sub": "synthetic-user", "aud": "qws"}, "cWNvbm5lY3Q")
+RENEWED_QCONNECT_JWT = make_jwt({"sub": "synthetic-user", "aud": "qws", "n": 2}, "cmVuZXdlZHFj")
 ISSUED_UAT = "synthetic-user-auth-token-0123456789abcdef"
 OTHER_UAT = "synthetic-other-auth-token-fedcba9876543210"
-SECRETS = (API_JWT, RENEWED_JWT, OTHER_JWT, QCONNECT_JWT, ISSUED_UAT, OTHER_UAT)
+SECRETS = (API_JWT, RENEWED_JWT, OTHER_JWT, QCONNECT_JWT, RENEWED_QCONNECT_JWT, ISSUED_UAT, OTHER_UAT)
 
 APP_ID = "123456789"
 GOOD_SECRET = "0123456789abcdef0123456789abcdef"
@@ -121,6 +122,8 @@ class FakeQobuzApi:
             return httpx.Response(200, json={"albums": {"items": self.featured, "total": len(self.featured)}})
         if endpoint == "album/get":
             return httpx.Response(200, json={"id": request.url.params["album_id"], "tracks": {"items": self.album_tracks}})
+        if endpoint == "track/get":
+            return httpx.Response(200, json=track_body(int(request.url.params["track_id"])))
         return httpx.Response(404)
 
     def _login(self, request: httpx.Request, by_bearer: bool) -> httpx.Response:
@@ -159,6 +162,23 @@ class FakeQobuzApi:
                 "mime_type": "audio/flac",
             },
         )
+
+
+def track_body(track_id: int) -> dict:
+    """A track/get answer, as far as the plugin reads one."""
+    return {
+        "id": track_id,
+        "title": f"Synthetic song {track_id}",
+        "duration": 240,
+        "performer": {"id": 5, "name": "Synthetic Performer"},
+        "album": {
+            "id": "alb1",
+            "title": "Synthetic Album",
+            "image": {"small": "https://img.qobuz.test/s.jpg", "large": "https://img.qobuz.test/l.jpg"},
+            "label": {"id": 3, "name": "Label"},
+            "genre": {"id": 4, "name": "Jazz"},
+        },
+    }
 
 
 def _endpoint(request: httpx.Request) -> str:
@@ -204,6 +224,20 @@ class FakeAdvertiser:
         self.stops += 1
 
 
+class FakeSessionSink:
+    """Records what pairing tells Connect playback."""
+
+    def __init__(self):
+        self.ready = []
+        self.ended = 0
+
+    def session_ready(self, link, *, handed_over):
+        self.ready.append((link.session, handed_over))
+
+    def session_ended(self):
+        self.ended += 1
+
+
 class FakeRefresher:
     """Records how the pairing service drives renewal."""
 
@@ -242,11 +276,13 @@ def handoff_body(
     api_jwt: str = API_JWT,
     session_id: str = "sess-1234-abcd",
     api_exp: int = 4102444800,
+    qconnect_jwt: str = QCONNECT_JWT,
+    endpoint: str = "wss://qws.qobuz.test/ws",
     **extra,
 ) -> bytes:
     body = {
         "session_id": session_id,
-        "jwt_qconnect": {"jwt": QCONNECT_JWT, "exp": 4102444800, "endpoint": "wss://qws.qobuz.test/ws"},
+        "jwt_qconnect": {"jwt": qconnect_jwt, "exp": 4102444800, "endpoint": endpoint},
         "jwt_api": {"jwt": api_jwt, "exp": api_exp},
     }
     body.update(extra)

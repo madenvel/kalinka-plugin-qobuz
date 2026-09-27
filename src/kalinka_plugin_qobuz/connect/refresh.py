@@ -18,8 +18,7 @@ from typing import Awaitable, Callable, Optional
 
 import httpx
 
-from ..auth import Credential, CredentialKind, TokenHolder, fingerprint
-from .handoff import unix_seconds
+from ..auth import Credential, CredentialKind, TokenHolder, fingerprint, unix_seconds
 
 logger = logging.getLogger(__name__.split(".")[-1])
 

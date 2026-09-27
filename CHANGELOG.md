@@ -5,19 +5,22 @@ Curated, user-facing notes per release. Add a `## <version>` section before tagg
 ## 5.0.0
 
 ### Changed
-- **Link Qobuz from the Qobuz app instead of pasting a token.** While Qobuz is not linked, the player shows up in the Qobuz app's device picker. Choosing it there hands the player a token, which the plugin exchanges for a regular Qobuz user auth token and checks against your account, favourites, playlists, the catalogue and a stream before using it. Browsing, search, favourites, playlists, playback quality and streaming reports work as before. The Qobuz app shows a spinner and then moves to another device; that is expected, and Kalinka's settings say whether the link worked.
+- **Link Qobuz from the Qobuz app instead of pasting a token.** While Qobuz is not linked, the player shows up in the Qobuz app's device picker. Choosing it there hands the player a token, which the plugin exchanges for a regular Qobuz user auth token and checks against your account, favourites, playlists, the catalogue and a stream before using it. Browsing, search, favourites, playlists, playback quality and streaming reports work as before. Kalinka's settings say whether the link worked.
 - **The *User auth token* setting is gone.** A token saved by an older version is ignored; the server logs one warning about it on each start until the entry is removed from `/etc/kalinka/kalinka_conf.cfg`. Link again from the Qobuz app after upgrading.
 - Qobuz now starts without waiting for the network, so a player that boots before its network still shows Qobuz and how to link it.
 - Until an account is linked, Qobuz is marked unavailable and lists nothing: no shelves, search results, favourites or playlists. It never empties favourites, playlists or search results from other sources.
 - Qobuz's startup checks no longer rely on one fixed test track, which can disappear from the catalogue or a region; they use a track from current new releases.
 
 ### Added
+- **Play from the Qobuz app (Qobuz Connect).** On Kalinka server 5.2 or newer, the linked player is a speaker in the Qobuz app's device picker. Playing on it takes over the output Kalinka plays through; Kalinka's mini player and now-playing screen show the track, its queue screen says the Qobuz Connect queue is playing and Kalinka's is not, and pause, seek, next and previous work from either app. The volume follows both ways: the Qobuz app sets it on whatever controls Kalinka's volume, and a change made in Kalinka or on the device shows in the Qobuz app. The Qobuz app shows the format that plays, and changing its streaming quality switches the playing track to it. Playing from Kalinka's queue takes the output back, and the Qobuz app shows playback stopped. Switching Kalinka's output moves the Qobuz playback along, and a stream that fails is fetched again once, from where it was. On an older server the plugin links as before, and the Qobuz app moves on to another device after a spinner.
 - A *Qobuz account* status line in Qobuz's settings: not linked, pairing, linked (with the account), reconnecting, or expired.
 - **Unpair Qobuz account on next restart**, to forget the linked account and pair another. A linked player refuses every other pairing until it is unpaired, across restarts and expiry.
 - If Qobuz issues no user auth token, the app's one-hour token is kept and renews itself before it expires.
 - Expert settings for the name shown in the Qobuz app and for the pairing port.
 
-This is a prototype: the pairing protocol is undocumented, and the hourly renewal fallback has not yet run against a real account for days.
+Needs Kalinka plugin SDK 3.4 or newer.
+
+This is a prototype: the Qobuz Connect protocol is undocumented, and the hourly renewal fallback has not yet run against a real account for days.
 
 ## 3.0.0
 

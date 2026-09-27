@@ -2,11 +2,13 @@
 
 While unlinked, the player advertises itself and accepts one handoff at a
 time. A handed-over credential is checked on a separate client and only then
-replaces anything. Once linked, pairing closes and stays closed, across
-restarts and expiry, until the user unpairs.
+replaces anything. Once linked, no other account is accepted, across restarts
+and expiry, until the user unpairs.
 
-Nothing here reaches the play queue or playback: a handoff only ever yields a
-credential for the REST client.
+With a session sink (Connect playback), the player keeps advertising once
+linked: the Qobuz app hands the linked account's Connect session over again
+each time the user chooses the player, and the sink joins it. Without one,
+pairing closes once linked. Nothing here reaches playback itself.
 """
 
 import asyncio
@@ -14,20 +16,29 @@ import enum
 import logging
 import socket
 import time
+from dataclasses import replace
 from importlib import metadata
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Protocol, TypeVar
 
 import httpx
 from kalinka_plugin_sdk.module_health import ModuleHealthState, ModuleState
 
 from .. import auth
-from ..account import AccessCheckError, Validated, describe_failure, validate_account_access
+from ..account import (
+    AccessCheckError,
+    AccountInfo,
+    Validated,
+    describe_failure,
+    probe_account,
+    validate_account_access,
+)
 from ..auth import Credential, CredentialKind, QobuzAuth, TokenHolder
 from ..qobuz import AppBundle, QobuzClient, load_app_bundle
 from .discovery import Advert, Advertiser, NoAddressesError, ZeroconfAdvertiser
 from .handoff import Handoff, HandoffError, describe, parse_handoff
 from .receiver import HandoffReceiver
 from .refresh import TokenRefresher, renewable
+from .session_token import SessionToken
 from .store import LinkState, LinkStore
 
 logger = logging.getLogger(__name__.split(".")[-1])
@@ -37,6 +48,25 @@ RESTORE_RETRY_MAX_S = 300
 WINDOW_RETRY_S = 30
 
 _UNPAIR = "*Unpair Qobuz account on next restart*"
+
+_T = TypeVar("_T")
+
+
+async def _account_of(client: QobuzClient, credential: Credential) -> AccountInfo:
+    account, _ = await probe_account(client, credential)
+    return account
+
+
+class SessionSink(Protocol):
+    """Receives the linked account's Connect session."""
+
+    def session_ready(self, link: LinkState, *, handed_over: bool) -> None:
+        """``link.session`` is current; ``handed_over`` means the user just chose this player."""
+        ...
+
+    def session_ended(self) -> None:
+        """The account is no longer linked, or its link expired."""
+        ...
 
 
 class _WindowUnavailable(Exception):
@@ -57,7 +87,8 @@ def default_device_name() -> str:
     return f"Kalinka ({socket.gethostname()})"
 
 
-def _sdk_version() -> str:
+def software_version() -> str:
+    """How this player names its software to the Qobuz app."""
     try:
         return f"kalinka-qobuz-{metadata.version('kalinka-plugin-qobuz')}"
     except metadata.PackageNotFoundError:
@@ -84,6 +115,7 @@ class PairingService:
         port: int,
         load_bundle: Callable[[], Awaitable[AppBundle]] = load_app_bundle,
         validate: Callable[[QobuzClient, TokenHolder], Awaitable[Validated]] = validate_account_access,
+        identify: Callable[[QobuzClient, Credential], Awaitable[AccountInfo]] = _account_of,
         make_probe_client: Callable[[TokenHolder], QobuzClient] = (
             lambda holder: QobuzClient(auth=QobuzAuth(holder))
         ),
@@ -92,16 +124,19 @@ class PairingService:
         ),
         advertiser: Optional[Advertiser] = None,
         make_refresher: Callable[..., TokenRefresher] = TokenRefresher,
+        sessions: Optional[SessionSink] = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
         self._client = client
+        self._sessions = sessions
         self._holder = holder
         self._store = store
         self._device_name = device_name
         self._port = port
         self._load_bundle = load_bundle
         self._validate = validate
+        self._identify = identify
         self._make_probe_client = make_probe_client
         self._make_receiver = make_receiver
         self._advertiser = advertiser or ZeroconfAdvertiser()
@@ -119,6 +154,8 @@ class PairingService:
         self._pending: Optional[Handoff] = None
         self._task: Optional[asyncio.Task] = None
         self._validation: Optional[asyncio.Task] = None
+        self._relink: Optional[asyncio.Task] = None
+        self._closing: Optional[asyncio.Task] = None
         self._receiver: Optional[HandoffReceiver] = None
         self._advertising = False
         self._refresher: Optional[TokenRefresher] = None
@@ -145,6 +182,8 @@ class PairingService:
         unlinked = self._link.unlinked()
         self._store.save(unlinked)
         self._link = unlinked
+        if self._sessions is not None:
+            self._sessions.session_ended()
         logger.warning("Qobuz account unpaired; this player will wait for a new pairing")
 
     def start(self) -> None:
@@ -152,7 +191,11 @@ class PairingService:
 
     async def stop(self) -> None:
         self._stopped = True
-        tasks = [task for task in (self._task, self._validation) if task is not None]
+        tasks = [
+            task
+            for task in (self._task, self._validation, self._relink, self._closing)
+            if task is not None
+        ]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -161,6 +204,25 @@ class PairingService:
         await self._close_window()
         if self._refresh_http is not None:
             await self._refresh_http.aclose()
+
+    def api_bearer(self) -> Optional[Credential]:
+        """A live API Bearer token, for renewing the Connect session."""
+        credential = self._holder.credential
+        if credential is not None and credential.kind is CredentialKind.BEARER:
+            return credential
+        stored = self._link.api_bearer
+        if stored is None or (stored.exp and stored.exp <= self._clock()):
+            return None
+        return stored
+
+    def store_session(self, session: SessionToken) -> None:
+        """Keep a renewed Connect session token with the link.
+
+        @throw OSError when it cannot be stored; it stays in use meanwhile.
+        """
+        updated = self._link.with_session(session, self._link.api_bearer)
+        self._link = updated
+        self._store.save(updated)
 
     async def renew_after_401(self, credential: Credential) -> bool:
         refresher = self._refresher
@@ -179,8 +241,12 @@ class PairingService:
         }
 
     def connect_info(self) -> dict:
+        if self._pending is not None:
+            session_id = self._pending.session_id
+        else:
+            session_id = self._link.session.session_id if self._link.session else ""
         return {
-            "current_session_id": self._pending.session_id if self._pending else "",
+            "current_session_id": session_id,
             "app_id": self._bundle.app_id if self._bundle else "",
         }
 
@@ -199,6 +265,14 @@ class PairingService:
                 return 200, {}
             logger.warning("Qobuz Connect handoff refused: another pairing is in progress")
             return 400, {"error": "pairing already in progress"}
+        if self._phase is Phase.LINKED and self._sessions is not None and not self._stopped:
+            # A newer handoff wins, as with any receiver.
+            if self._relink is not None:
+                self._relink.cancel()
+            self._relink = asyncio.create_task(
+                self._take_handoff(handoff), name="qobuz-connect-relink"
+            )
+            return 200, {}
         if self._phase is not Phase.WAITING or self._stopped:
             logger.warning("Qobuz Connect handoff refused in phase %s", self._phase.value)
             return 400, {"error": "device is not accepting pairing"}
@@ -289,8 +363,10 @@ class PairingService:
         self._client.configure_app(self._bundle.app_id, self._bundle.secrets)
         if self._link.linked:
             await self._restore()
+            if self._phase is Phase.LINKED and self._sessions is not None:
+                await self._open_window_until_ready(pairing=False)
         else:
-            await self._open_window_until_ready()
+            await self._open_window_until_ready(pairing=True)
 
     async def _load_bundle_until_ready(self) -> AppBundle:
         failures = 0
@@ -351,13 +427,7 @@ class PairingService:
         self._client.install_account(validated.account)
         current = self._link
         if validated.account != current.account or validated.credential != current.credential:
-            updated = LinkState(
-                device_uuid=current.device_uuid,
-                linked=True,
-                linked_at=current.linked_at,
-                credential=validated.credential,
-                account=validated.account,
-            )
+            updated = replace(current, credential=validated.credential, account=validated.account)
             try:
                 self._store.save(updated)
                 self._link = updated
@@ -371,38 +441,57 @@ class PairingService:
         # which stops for good once it sees one it cannot renew.
         self._start_refresher()
         logger.info("Qobuz link restored for user %s", validated.account.user_id)
+        if self._sessions is not None:
+            self._sessions.session_ready(self._link, handed_over=False)
 
-    async def _open_window_until_ready(self) -> None:
+    async def _open_window_until_ready(self, *, pairing: bool) -> None:
+        """Listen for handoffs: to pair, or, once linked, to take the session again."""
         while True:
+            if not pairing and self._phase is not Phase.LINKED:
+                # The link expired while this waited to retry: nothing to offer.
+                return
             try:
                 await self._open_window()
-                return
             except asyncio.CancelledError:
                 await self._close_window()
                 raise
             except _WindowUnavailable as exc:
                 await self._close_window()
-                self._set(Phase.UNAVAILABLE, detail=str(exc))
+                if pairing:
+                    self._set(Phase.UNAVAILABLE, detail=str(exc))
                 logger.warning(
-                    "Qobuz Connect pairing unavailable (%s); retrying in %ds",
-                    self._detail,
+                    "Qobuz Connect handoffs unavailable (%s); retrying in %ds",
+                    exc,
                     WINDOW_RETRY_S,
                 )
                 await self._sleep(WINDOW_RETRY_S)
+                continue
+            if pairing:
+                self._holder.clear(auth.NOT_LINKED)
+                self._set(Phase.WAITING)
+            elif self._phase is not Phase.LINKED:
+                # Expired while the window opened: close what _expire could not see yet.
+                await self._close_window()
+            return
 
     async def _open_window(self) -> None:
-        self._receiver = self._make_receiver(self, self._port)
+        # Held locally: an expiry's _close_window may detach it meanwhile.
+        receiver = self._receiver = self._make_receiver(self, self._port)
         try:
-            await self._receiver.start()
+            await receiver.start()
         except OSError as exc:
             raise _WindowUnavailable(
                 f"cannot listen on port {self._port} ({exc.strerror or type(exc).__name__})"
             ) from None
+        if self._receiver is not receiver:
+            # Closed while it started, so nothing stopped the listener.
+            await receiver.stop()
+            return
         advert = Advert(
             friendly_name=self._device_name,
             device_uuid=self._link.device_uuid,
-            port=self._receiver.port,
-            sdk_version=_sdk_version(),
+            port=receiver.port,
+            sdk_version=software_version(),
         )
         try:
             await self._advertiser.start(advert)
@@ -415,8 +504,6 @@ class PairingService:
                 f"cannot advertise on the network ({type(exc).__name__})"
             ) from None
         self._advertising = True
-        self._holder.clear(auth.NOT_LINKED)
-        self._set(Phase.WAITING)
 
     async def _close_window(self) -> None:
         receiver, self._receiver = self._receiver, None
@@ -432,26 +519,71 @@ class PairingService:
             if receiver is not None:
                 await receiver.stop()
 
-    async def _validate_handoff(self, attempt: int, handoff: Handoff) -> None:
-        probe_holder = TokenHolder()
-        probe_holder.install(handoff.credential)
+    async def _probe(
+        self,
+        credential: Credential,
+        check: Callable[[QobuzClient, TokenHolder], Awaitable[_T]],
+    ) -> tuple[_T, QobuzClient]:
+        """Run ``check`` on a separate client that sends ``credential``, then close it.
+
+        @throw Whatever creating the client or ``check`` raises.
+        """
+        holder = TokenHolder()
+        holder.install(credential)
         probe: Optional[QobuzClient] = None
         try:
-            # Inside the try: a failure here must still end VALIDATING, or
-            # every later handoff would be refused as a pairing in progress.
-            probe = self._make_probe_client(probe_holder)
+            probe = self._make_probe_client(holder)
             probe.configure_app(self._bundle.app_id, self._bundle.secrets)
-            validated = await self._validate(probe, probe_holder)
+            return await check(probe, holder), probe
+        finally:
+            if probe is not None:
+                await probe.aclose()
+
+    async def _validate_handoff(self, attempt: int, handoff: Handoff) -> None:
+        try:
+            # A failure creating the probe must still end VALIDATING, or every
+            # later handoff would be refused as a pairing in progress.
+            validated, probe = await self._probe(handoff.credential, self._validate)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._reject(attempt, describe_failure(exc))
             return
-        finally:
-            if probe is not None:
-                await probe.aclose()
-        if self._commit(attempt, validated, probe.sec):
+        if self._commit(attempt, validated, probe.sec) and self._sessions is None:
             await self._close_window()
+
+    async def _take_handoff(self, handoff: Handoff) -> None:
+        """A handoff to a linked player: take its session if it is the same account."""
+        linked = self._link.account
+        try:
+            handed, _ = await self._probe(
+                handoff.credential, lambda probe, _: self._identify(probe, handoff.credential)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Qobuz Connect handoff not taken: %s", describe_failure(exc))
+            return
+        if linked is None or handed.user_id != linked.user_id:
+            logger.warning(
+                "Qobuz Connect handoff refused: this player is linked to another "
+                "Qobuz account; unpair it first"
+            )
+            return
+        if self._phase is not Phase.LINKED or self._stopped or self._sessions is None:
+            return
+        updated = self._link.with_session(
+            handoff.session, handoff.api_bearer or self._link.api_bearer
+        )
+        self._link = updated
+        try:
+            self._store.save(updated)
+        except OSError as exc:
+            logger.error(
+                "Could not store the Qobuz Connect session (%s); it is in use until restart",
+                exc.strerror or type(exc).__name__,
+            )
+        self._sessions.session_ready(updated, handed_over=True)
 
     def _reject(self, attempt: int, reason: str) -> None:
         if attempt != self._attempt or self._phase is not Phase.VALIDATING:
@@ -465,12 +597,15 @@ class PairingService:
         if attempt != self._attempt or self._phase is not Phase.VALIDATING or self._stopped:
             logger.info("Discarded a Qobuz Connect pairing that finished after it was superseded")
             return False
+        handoff = self._pending
         link = LinkState(
             device_uuid=self._link.device_uuid,
             linked=True,
             linked_at=int(self._clock()),
             credential=validated.credential,
             account=validated.account,
+            session=handoff.session if handoff else None,
+            api_bearer=handoff.api_bearer if handoff else None,
         )
         try:
             self._store.save(link)
@@ -492,6 +627,8 @@ class PairingService:
             validated.account.label or "no subscription label",
             validated.credential.kind.value,
         )
+        if self._sessions is not None:
+            self._sessions.session_ready(link, handed_over=True)
         return True
 
     def _start_refresher(self) -> None:
@@ -523,6 +660,11 @@ class PairingService:
         self._holder.clear(auth.EXPIRED)
         self._set(Phase.EXPIRED, detail=reason)
         logger.warning("Qobuz link expired: %s. Unpair to pair again.", reason)
+        if self._sessions is not None:
+            self._sessions.session_ended()
+            # An expired link takes no handoffs, so stop offering the player.
+            if self._advertising or self._receiver is not None:
+                self._closing = asyncio.create_task(self._close_window())
 
     def _set(self, phase: Phase, *, detail: str = "") -> None:
         self._detail = detail

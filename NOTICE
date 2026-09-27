@@ -7,12 +7,14 @@ This product is an independent, community-developed integration and is not
 affiliated with, endorsed by, or supported by Qobuz or its parent companies.
 "Qobuz" is a trademark of its respective owner.
 
-Qobuz Connect pairing
----------------------
-The pairing protocol details used in src/kalinka_plugin_qobuz/connect/ (the
-mDNS advertisement, the /streamcore endpoints, the handoff payload and token
-renewal) were adapted from Pibuz, https://github.com/PhilipVinc/pibuz, which
-is distributed under the MIT License:
+Qobuz Connect
+-------------
+The Qobuz Connect protocol details used in src/kalinka_plugin_qobuz/connect/
+(the mDNS advertisement, the /streamcore endpoints, the handoff payload, token
+renewal, the cloud websocket's framing, the protobuf message definitions, and
+the renderer's queue, state, volume and quality messages) were adapted from
+Pibuz, https://github.com/PhilipVinc/pibuz, which is distributed under the MIT
+License:
 
   MIT License
 

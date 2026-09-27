@@ -9,6 +9,7 @@ import logging
 
 import httpx
 import pytest
+import pytest_asyncio
 from kalinka_plugin_sdk.datamodel import EntityId, EntityType, FavoriteIds
 from kalinka_plugin_sdk.events import TracksRemovedEvent
 from kalinka_plugin_sdk.inputmodule import SearchType, SourceUnavailableError
@@ -22,7 +23,12 @@ from kalinka_plugin_qobuz.connect.pairing import PairingService, Phase
 from kalinka_plugin_qobuz.connect.receiver import HandoffReceiver
 from kalinka_plugin_qobuz.connect.store import LinkState, LinkStore, default_store_path
 
+from kalinka_plugin_qobuz.connect import cloud_link
+from kalinka_plugin_qobuz.connect.proto import qconnect_pb2 as qc
+
 from conftest import ACCOUNT, BUNDLE, FakeAdvertiser, assert_no_secrets, bearer, handoff_body, settle
+from fake_cloud import FakeCloud
+from test_cloud_renderer import FakeDirect
 
 
 class _Listener:
@@ -52,6 +58,7 @@ class _Context:
         self.config = config
         self.listener = _Listener()
         self.playqueue = _PlayQueueSpy()
+        self.direct_playback = None
 
 
 async def _validate(client, holder):
@@ -80,9 +87,19 @@ def offline(monkeypatch, tmp_path):
     )
 
 
-async def _set_up(config=None):
+@pytest_asyncio.fixture
+async def cloud(monkeypatch):
+    monkeypatch.setattr(cloud_link, "BACKOFF_START_S", 0.01)
+    fake = await FakeCloud().start()
+    yield fake
+    await fake.stop()
+
+
+async def _set_up(config=None, direct=None):
     plugin = module_setup.KalinkaPluginQobuz()
     context = _Context(config or QobuzConfig())
+    if direct is not None:
+        context.direct_playback = direct
     await plugin.setup(context)
     await settle(lambda: plugin._pairing.phase in (Phase.WAITING, Phase.LINKED))
     return plugin, context
@@ -209,3 +226,40 @@ async def test_shutdown_leaves_nothing_running(offline):
     with pytest.raises(OSError):
         await asyncio.open_connection("127.0.0.1", port)
     assert plugin._client.session.is_closed
+
+
+async def _link_over_http(plugin, **handoff):
+    port = plugin._pairing._receiver.port
+    async with httpx.AsyncClient() as http:
+        response = await http.post(
+            f"http://127.0.0.1:{port}/streamcore/connect-to-qconnect", content=handoff_body(**handoff)
+        )
+    assert response.status_code == 200
+    await settle(lambda: plugin._pairing.phase is Phase.LINKED)
+
+
+@pytest.mark.asyncio
+async def test_on_an_older_server_linking_says_app_playback_needs_a_newer_one(offline):
+    plugin, _ = await _set_up()
+
+    await _link_over_http(plugin)
+
+    status = await plugin.resolve_dynamic_field(module_setup.STATUS_FIELD)
+    assert "needs a newer Kalinka server" in status
+    await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_linking_joins_the_accounts_connect_session(offline, cloud):
+    plugin, context = await _set_up(direct=FakeDirect())
+
+    await _link_over_http(plugin, endpoint=cloud.url)
+    await cloud.until(lambda: qc.RNDR_SRVR_JOIN_SESSION in cloud.kinds())
+    await cloud.until(lambda: cloud.states())
+
+    status = await plugin.resolve_dynamic_field(module_setup.STATUS_FIELD)
+    assert "**Linked**" in status
+    assert "**Qobuz Connect:** selected in the Qobuz app." in status
+    assert context.playqueue.touched == []
+    await plugin.shutdown()
+    assert cloud.states()[-1].playing_state == 1

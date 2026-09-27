@@ -6,11 +6,15 @@ then on, whoever holds the client.
 """
 
 import hashlib
+import logging
+import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__.split(".")[-1])
 
 
 class AuthenticationError(Exception):
@@ -25,6 +29,23 @@ EXPIRED = "The Qobuz link has expired. Unpair Qobuz in settings, then pair again
 class CredentialKind(str, Enum):
     BEARER = "bearer"
     USER_AUTH_TOKEN = "user_auth_token"
+
+
+# Unix seconds pass 10**11 in the year 5138, so a larger `exp` is milliseconds.
+_MILLISECONDS_THRESHOLD = 10**11
+
+
+def unix_seconds(value: Any) -> int:
+    """A Qobuz ``exp`` as absolute Unix seconds, 0 when it is not a usable time."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return 0
+    # JSON parsing admits NaN and Infinity, which no integer can hold.
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0
+    if value > _MILLISECONDS_THRESHOLD:
+        logger.info("Qobuz gave an expiry in milliseconds; converted")
+        return int(value // 1000)
+    return int(value)
 
 
 def fingerprint(secret: str) -> str:

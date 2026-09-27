@@ -12,7 +12,7 @@ from kalinka_plugin_qobuz.connect.handoff import (
     parse_handoff,
 )
 
-from conftest import API_JWT, QCONNECT_JWT, assert_no_secrets, handoff_body
+from conftest import API_JWT, QCONNECT_JWT, assert_no_secrets, bearer, handoff_body
 
 NOW = 1_700_000_000
 
@@ -46,6 +46,17 @@ def test_a_plain_user_auth_token_is_preferred_when_present():
 
     assert handoff.credential.kind is CredentialKind.USER_AUTH_TOKEN
     assert handoff.credential.token == "uat-synthetic"
+    assert handoff.api_bearer == bearer(API_JWT, exp=4102444800)
+
+
+def test_the_connect_session_is_kept():
+    handoff = parse_handoff(handoff_body(), NOW)
+
+    assert handoff.session.jwt == QCONNECT_JWT
+    assert handoff.session.endpoint == "wss://qws.qobuz.test/ws"
+    assert handoff.session.exp == 4102444800
+    assert handoff.session.session_id == "sess-1234-abcd"
+    assert_no_secrets(repr(handoff.session), repr(handoff))
 
 
 @pytest.mark.parametrize(
