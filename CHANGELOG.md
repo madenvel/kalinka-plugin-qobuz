@@ -16,7 +16,7 @@ Curated, user-facing notes per release. Add a `## <version>` section before tagg
 - A *Qobuz account* status line in Qobuz's settings: not linked, pairing, linked (with the account), reconnecting, or expired.
 - **Unpair Qobuz account on next restart**, to forget the linked account and pair another. A linked player refuses every other pairing until it is unpaired, across restarts and expiry.
 - If Qobuz issues no user auth token, the app's one-hour token is kept and renews itself before it expires.
-- Expert settings for the name shown in the Qobuz app and for the pairing port.
+- A *Qobuz Connect device name* setting for the name the player has in the Qobuz app, and an expert setting for the pairing port.
 - **One command installs or upgrades the plugin.** `scripts/install-latest.sh` fetches the latest release, checks it against the release's checksums and installs it with apt, on a Raspberry Pi or any other Kalinka machine; the README shows how to run it.
 
 Needs Kalinka server 5.2 or newer, which brings plugin SDK 3.4; the package will not install on an older one.

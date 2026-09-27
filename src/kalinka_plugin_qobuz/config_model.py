@@ -53,9 +53,10 @@ class QobuzConfig(ModuleConfig):
         default="",
         title="Qobuz Connect device name",
         description=(
-            "Name shown in the Qobuz app's device picker while pairing. "
-            "Empty uses \"Kalinka (<hostname>)\"."
+            "Name this player has in the Qobuz app's device picker, for "
+            "pairing and for playing. Empty uses \"Kalinka (<hostname>)\"."
         ),
+        json_schema_extra={"importance": "simple"},
     )
     connect_port: int = Field(
         default=8183,

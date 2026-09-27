@@ -45,7 +45,7 @@ Then link your Qobuz account, as below.
 
 The plugin links to your account through the official Qobuz app. There is no token to copy.
 
-1. Enable Qobuz in Kalinka's settings. While it is not linked, the player advertises itself on your network as **Kalinka (hostname)**. You can change that name under *Qobuz Connect device name*.
+1. Enable Qobuz in Kalinka's settings. While it is not linked, the player advertises itself on your network as **Kalinka (hostname)**. You can change that name in Kalinka's Qobuz settings, under *Qobuz Connect device name*.
 2. On a phone or computer on the same network, open the Qobuz app and open its device picker, where you would choose a speaker.
 3. Choose Kalinka. The app hands the player a token that lasts an hour. The plugin exchanges it for a regular Qobuz user auth token, the same kind the old *User auth token* setting held, and checks it: it reads your account, favourites, playlists, new releases and a stream URL.
 4. The *Qobuz account* line in Qobuz's settings then reads **Linked**, and you browse and play Qobuz in Kalinka as before.
