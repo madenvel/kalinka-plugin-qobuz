@@ -28,6 +28,8 @@ HANDOFF = "/streamcore/connect-to-qconnect"
 REQUEST_DEADLINE_S = 10.0
 MAX_HEADER_BYTES = 16 * 1024
 MAX_CONNECTIONS = 8
+# How long stop() lets requests already in hand finish before closing them.
+STOP_GRACE_S = 1.0
 _READ_CHUNK = 16 * 1024
 
 
@@ -52,6 +54,7 @@ class HandoffReceiver:
         self._port = port
         self._server: Optional[asyncio.AbstractServer] = None
         self._writers: set[asyncio.StreamWriter] = set()
+        self._serving: set[asyncio.Task] = set()
 
     @property
     def port(self) -> int:
@@ -70,6 +73,11 @@ class HandoffReceiver:
         if server is None:
             return
         server.close()
+        # The handoff that links an account is what stops the endpoint, and the
+        # app still waits for its answer; a client slow to ask is cut off.
+        serving = self._serving - {asyncio.current_task()}
+        if serving:
+            await asyncio.wait(serving, timeout=STOP_GRACE_S)
         for writer in list(self._writers):
             writer.close()
         await server.wait_closed()
@@ -80,6 +88,9 @@ class HandoffReceiver:
             writer.close()
             return
         self._writers.add(writer)
+        task = asyncio.current_task()
+        if task is not None:
+            self._serving.add(task)
         peer = writer.get_extra_info("peername")
         try:
             connection = h11.Connection(h11.SERVER, max_incomplete_event_size=MAX_HEADER_BYTES)
@@ -106,6 +117,7 @@ class HandoffReceiver:
             pass
         finally:
             self._writers.discard(writer)
+            self._serving.discard(asyncio.current_task())
             writer.close()
             with contextlib.suppress(ConnectionError, OSError):
                 await writer.wait_closed()
