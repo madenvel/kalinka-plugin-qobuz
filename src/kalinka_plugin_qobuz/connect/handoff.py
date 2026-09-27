@@ -8,11 +8,11 @@ Copyright (c) 2024 blitzkriegfc, Copyright (c) 2026 Filippo Vicentini.
 import base64
 import json
 import logging
-import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Optional
 
-from ..auth import Credential, CredentialKind, fingerprint
+from ..auth import Credential, CredentialKind, fingerprint, unix_seconds
+from .session_token import SessionToken, endpoint_host
 
 logger = logging.getLogger(__name__.split(".")[-1])
 
@@ -22,9 +22,6 @@ MAX_BODY_BYTES = 64 * 1024
 # time the rest of the pairing takes.
 EXPIRY_SLACK_S = 60
 
-# Unix seconds pass 10**11 in the year 5138, so a larger `exp` is milliseconds.
-_MILLISECONDS_THRESHOLD = 10**11
-
 
 class HandoffError(ValueError):
     """A handoff that cannot link this player. The message goes back to the app."""
@@ -32,14 +29,16 @@ class HandoffError(ValueError):
 
 @dataclass(frozen=True, repr=False)
 class Handoff:
-    """The part of a handoff the plugin keeps: the REST credential.
+    """What a handoff yields: the REST credential and the Connect session.
 
-    The Connect session token in the same body is checked, not kept; this
-    plugin never joins the Connect session.
+    ``api_bearer`` is the app's API token itself, kept even when ``credential``
+    is something else: renewing the session token needs it.
     """
 
     session_id: str
     credential: Credential
+    session: SessionToken
+    api_bearer: Optional[Credential]
     keys: tuple[str, ...]
 
     def same_as(self, other: "Handoff") -> bool:
@@ -53,26 +52,13 @@ def redact_session(session_id: str) -> str:
     return f"{session_id[:8]}…" if session_id else "-"
 
 
-def unix_seconds(value: Any) -> int:
-    """A Qobuz ``exp`` as absolute Unix seconds, 0 when it is not a usable time."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        return 0
-    # JSON parsing admits NaN and Infinity, which no integer can hold.
-    if isinstance(value, float) and not math.isfinite(value):
-        return 0
-    if value > _MILLISECONDS_THRESHOLD:
-        logger.info("Qobuz gave an expiry in milliseconds; converted")
-        return int(value // 1000)
-    return int(value)
-
-
 def _non_empty_string(container: dict, key: str) -> str:
     value = container.get(key)
     return value if isinstance(value, str) and value.strip() else ""
 
 
 def parse_handoff(body: bytes, now: float) -> Handoff:
-    """Validate a ``connect-to-qconnect`` body and extract the REST credential.
+    """Validate a ``connect-to-qconnect`` body and extract its credentials.
 
     A plain ``user_auth_token``, if the app ever sends one, is preferred: it
     is the credential the REST client has always used. Otherwise ``jwt_api``
@@ -98,19 +84,30 @@ def parse_handoff(body: bytes, now: float) -> Handoff:
 
     user_auth_token = _non_empty_string(document, "user_auth_token")
     api = document.get("jwt_api")
+    api_bearer = (
+        Credential(CredentialKind.BEARER, api["jwt"], unix_seconds(api.get("exp")))
+        if isinstance(api, dict) and _non_empty_string(api, "jwt")
+        else None
+    )
     if user_auth_token:
         credential = Credential(CredentialKind.USER_AUTH_TOKEN, user_auth_token)
-    elif isinstance(api, dict) and _non_empty_string(api, "jwt"):
-        credential = Credential(
-            CredentialKind.BEARER, api["jwt"], unix_seconds(api.get("exp"))
-        )
+    elif api_bearer is not None:
+        credential = api_bearer
     else:
         raise HandoffError("missing jwt_api")
 
     session_id = document.get("session_id")
+    session_id = session_id if isinstance(session_id, str) else ""
     return Handoff(
-        session_id=session_id if isinstance(session_id, str) else "",
+        session_id=session_id,
         credential=credential,
+        session=SessionToken(
+            jwt=session["jwt"],
+            endpoint=session["endpoint"],
+            exp=session_exp,
+            session_id=session_id,
+        ),
+        api_bearer=api_bearer,
         keys=tuple(sorted(document)),
     )
 
@@ -131,5 +128,7 @@ def describe(handoff: Handoff) -> str:
     return (
         f"session {redact_session(handoff.session_id)}, keys {list(handoff.keys)}, "
         f"{credential.kind.value} credential #{fingerprint(credential.token)}, "
-        f"exp {credential.exp or 'none'}, claims {claim_names(credential.token)}"
+        f"exp {credential.exp or 'none'}, claims {claim_names(credential.token)}, "
+        f"Connect session #{fingerprint(handoff.session.jwt)} at "
+        f"{endpoint_host(handoff.session.endpoint)}"
     )

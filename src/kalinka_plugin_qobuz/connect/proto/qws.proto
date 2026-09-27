@@ -1,0 +1,44 @@
+// Qobuz Connect cloud transport: the messages carried in the WebSocket
+// frames themselves, before any Connect payload.
+//
+// Reconstructed from Pibuz (https://github.com/PhilipVinc/pibuz, commit
+// 3b5abf4, crates/qconnect-transport-ws/src/transport.rs), MIT License:
+// Copyright (c) 2024 blitzkriegfc, Copyright (c) 2026 Filippo Vicentini.
+// Regenerate the bindings with scripts/gen_proto.sh.
+
+syntax = "proto2";
+
+package qws;
+
+// Frame type 1.
+message Authenticate {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;
+  optional string jwt = 3;
+}
+
+// Frame type 2.
+message Subscribe {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;
+  optional uint32 proto = 3;
+  repeated bytes channels = 4;
+}
+
+// Frame type 6; payload holds a qconnect.QConnectMessages batch.
+message CloudPayload {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;
+  optional uint32 proto = 3;
+  optional bytes src = 4;
+  repeated bytes dests = 5;
+  optional bytes payload = 7;
+}
+
+// Frame type 9.
+message ErrorMessage {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;
+  optional uint32 code = 3;
+  optional string descr = 4;
+}

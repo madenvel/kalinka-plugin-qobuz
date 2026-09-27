@@ -24,12 +24,17 @@ classifiers = [
 ]
 
 dependencies = [
-    "kalinka-plugin-sdk>=3,<4",
+    # 3.4: playing outside the play queue (Qobuz Connect).
+    "kalinka-plugin-sdk>=3.4,<4",
     "httpx[http2]>=0.24",
     # Qobuz Connect pairing: the local handoff endpoint and its mDNS advert.
     "h11>=0.14",
     "zeroconf>=0.47",
     "ifaddr>=0.1.7",
+    # Qobuz Connect playback: the cloud session. protobuf matches the
+    # committed bindings' generator (scripts/gen_proto.sh).
+    "websockets>=13",
+    "protobuf>=7.35,<8",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +42,7 @@ dev = [
     "pytest",
     "pytest-asyncio>=0.23",
     "setuptools-scm",
+    "grpcio-tools",
 ]
 
 [project.entry-points."kalinka.plugins"]

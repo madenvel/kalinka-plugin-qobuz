@@ -17,10 +17,12 @@ from kalinka_plugin_sdk import paths
 
 from ..account import AccountInfo
 from ..auth import Credential, CredentialKind
+from .session_token import SessionToken
 
 logger = logging.getLogger(__name__.split(".")[-1])
 
-_VERSION = 1
+# 2 adds the Connect session and the app's API token; 1 is still read.
+_VERSION = 2
 
 
 def default_store_path() -> str:
@@ -40,6 +42,9 @@ class LinkState:
     linked_at: int = 0
     credential: Optional[Credential] = None
     account: Optional[AccountInfo] = None
+    # The Connect session to join, and the API token that renews it.
+    session: Optional[SessionToken] = None
+    api_bearer: Optional[Credential] = None
 
     def unlinked(self) -> "LinkState":
         return LinkState(device_uuid=self.device_uuid)
@@ -47,49 +52,59 @@ class LinkState:
     def with_credential(self, credential: Credential) -> "LinkState":
         return replace(self, credential=credential)
 
+    def with_session(
+        self, session: Optional[SessionToken], api_bearer: Optional[Credential]
+    ) -> "LinkState":
+        return replace(self, session=session, api_bearer=api_bearer)
+
     def to_dict(self) -> dict:
         return {
             "version": _VERSION,
             "device_uuid": self.device_uuid,
             "linked": self.linked,
             "linked_at": self.linked_at,
-            "credential": (
-                {
-                    "kind": self.credential.kind.value,
-                    "token": self.credential.token,
-                    "exp": self.credential.exp,
-                }
-                if self.credential
-                else None
-            ),
+            "credential": _credential_dict(self.credential),
             "account": self.account.to_dict() if self.account else None,
+            "session": self.session.to_dict() if self.session else None,
+            "api_bearer": _credential_dict(self.api_bearer),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "LinkState":
-        credential = data.get("credential")
         account = data.get("account")
+        session = data.get("session")
         return cls(
             device_uuid=str(uuid.UUID(data["device_uuid"])),
             linked=bool(data.get("linked", False)),
             linked_at=int(data.get("linked_at", 0)),
-            credential=(
-                Credential(
-                    kind=CredentialKind(credential["kind"]),
-                    token=str(credential["token"]),
-                    exp=int(credential.get("exp", 0)),
-                )
-                if credential
-                else None
-            ),
+            credential=_credential(data.get("credential")),
             account=AccountInfo.from_dict(account) if account else None,
+            session=SessionToken.from_dict(session) if session else None,
+            api_bearer=_credential(data.get("api_bearer")),
         )
 
     def __repr__(self) -> str:
         return (
             f"LinkState(device={self.device_uuid}, linked={self.linked}, "
-            f"credential={self.credential!r}, account={self.account!r})"
+            f"credential={self.credential!r}, account={self.account!r}, "
+            f"session={self.session!r}, api_bearer={self.api_bearer!r})"
         )
+
+
+def _credential_dict(credential: Optional[Credential]) -> Optional[dict]:
+    if credential is None:
+        return None
+    return {"kind": credential.kind.value, "token": credential.token, "exp": credential.exp}
+
+
+def _credential(data: Optional[dict]) -> Optional[Credential]:
+    if not data:
+        return None
+    return Credential(
+        kind=CredentialKind(data["kind"]),
+        token=str(data["token"]),
+        exp=int(data.get("exp", 0)),
+    )
 
 
 class LinkStore:

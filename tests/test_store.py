@@ -7,9 +7,10 @@ import uuid
 
 import pytest
 
+from kalinka_plugin_qobuz.connect.session_token import SessionToken
 from kalinka_plugin_qobuz.connect.store import LinkState, LinkStore, default_store_path
 
-from conftest import ACCOUNT, API_JWT, assert_no_secrets, bearer
+from conftest import ACCOUNT, API_JWT, QCONNECT_JWT, assert_no_secrets, bearer, uat
 
 
 def _linked(device_uuid: str) -> LinkState:
@@ -81,3 +82,37 @@ def test_the_default_path_follows_the_install_prefix(monkeypatch, tmp_path):
     monkeypatch.setenv("KALINKA_PREFIX", str(tmp_path))
 
     assert default_store_path() == str(tmp_path / "var/lib/kalinka/qobuz/connect.json")
+
+
+def test_the_connect_session_round_trips_privately(tmp_path):
+    store = LinkStore(str(tmp_path / "qobuz" / "connect.json"))
+    session = SessionToken(jwt=QCONNECT_JWT, endpoint="wss://qws.qobuz.test/ws", exp=99, session_id="s")
+    state = _linked(store.load_or_create().device_uuid).with_session(session, bearer(API_JWT, exp=5))
+
+    store.save(state)
+
+    assert store.load_or_create() == state
+    assert_no_secrets(repr(state))
+
+
+def test_a_link_stored_before_connect_playback_still_reads(tmp_path):
+    path = tmp_path / "qobuz" / "connect.json"
+    path.parent.mkdir()
+    device = str(uuid.uuid4())
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "device_uuid": device,
+                "linked": True,
+                "linked_at": 1,
+                "credential": {"kind": "user_auth_token", "token": "synthetic-user-auth-token-0123456789abcdef", "exp": 0},
+                "account": ACCOUNT.to_dict(),
+            }
+        )
+    )
+
+    state = LinkStore(str(path)).load_or_create()
+
+    assert state.linked and state.credential == uat()
+    assert state.session is None and state.api_bearer is None
