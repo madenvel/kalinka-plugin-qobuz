@@ -1,0 +1,79 @@
+name: Tests
+
+# Runs the test suite on every pull request and on main, and before a release
+# is built (release.yml calls this workflow).
+#
+# - Require the "Tests pass" check in a ruleset. It fails unless every Python
+#   version passed; a job skipped because another failed would count as passing.
+# - Python 3.10 is the oldest the plugin supports, 3.13 the newest Kalinka's
+#   own CI runs.
+# - The plugin SDK is not on PyPI. It is installed from the KalinkaPlayer repo
+#   at KALINKA_SDK_REF, main unless the repository variable of that name says
+#   otherwise, so a plugin change that needs an unmerged SDK fails here until
+#   that SDK reaches main.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Commit or tag to test; the event ref when empty'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  KALINKA_SDK_REF: ${{ vars.KALINKA_SDK_REF || 'main' }}
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0   # setuptools_scm reads the version from the tags
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the plugin and the SDK
+        run: |
+          python -m pip install --upgrade pip
+          # One resolve, with the SDK named by URL: pip never looks the name up
+          # on PyPI, where anyone could register it.
+          python -m pip install \
+            "kalinka-plugin-sdk @ git+https://github.com/Kalinka-Player/KalinkaPlayer@${KALINKA_SDK_REF}#subdirectory=packages/kalinka-plugin-sdk" \
+            -e ".[dev]"
+
+      - name: Tests
+        run: python -m pytest -rfE
+
+  pass:
+    name: Tests pass
+    if: always()
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every Python version passed
+        env:
+          RESULT: ${{ needs.test.result }}
+        run: |
+          echo "Tests: $RESULT"
+          [ "$RESULT" = success ]

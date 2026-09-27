@@ -9,6 +9,7 @@ name: Release
 # - This plugin is pure Python: the package is architecture-independent
 #   (`_all.deb`), so a single amd64 runner builds the one artifact everyone
 #   installs. No matrix, no container, no native toolchain.
+# - Nothing is built until the tests pass (tests.yml), for the tagged commit.
 # - The version comes from git via setuptools_scm (tag_regex in pyproject.toml),
 #   so the checkout fetches full history + tags and builds from the tagged
 #   commit — otherwise the wheel is labelled `…devN+g<sha>`, which
@@ -28,8 +29,15 @@ permissions:
   contents: write
 
 jobs:
+  tests:
+    name: Tests
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+
   release:
     name: Build and publish
+    needs: tests
     runs-on: ubuntu-24.04
     steps:
       - name: Install build dependencies

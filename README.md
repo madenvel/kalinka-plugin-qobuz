@@ -179,11 +179,20 @@ Then check playback from the Qobuz app:
 ## Development
 
 ### Testing
-Run the included smoke tests:
+
+The tests need the plugin SDK, which is not on PyPI. Install it from the KalinkaPlayer repo in the same command as the plugin, so pip never looks the name up on PyPI:
 
 ```bash
-pytest tests/
+python3 -m venv .venv
+.venv/bin/pip install \
+  "kalinka-plugin-sdk @ git+https://github.com/Kalinka-Player/KalinkaPlayer#subdirectory=packages/kalinka-plugin-sdk" \
+  -e ".[dev]"
+.venv/bin/pytest
 ```
+
+Add `@<branch>` after `KalinkaPlayer` to test against an SDK that is not on `main` yet.
+
+GitHub runs the same tests on Python 3.10 and 3.13 for every pull request and push to `main` (`.github/workflows/tests.yml`), and a release is built only once they pass. **Tests pass** is the check to require in a ruleset. The SDK comes from KalinkaPlayer's `main`, unless the repository variable `KALINKA_SDK_REF` names another branch or tag.
 
 ## License
 
