@@ -1,17 +1,23 @@
 import asyncio
 import copy
+import functools
 import hashlib
+import inspect
 import json
 import logging
 import time
-from functools import partial
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 import httpx
 from pydantic import BaseModel, PositiveInt
 
+from .auth import AuthenticationError, QobuzAuth
 from .bundle import load_bundle
 from .config_model import QobuzAudioFormat, QobuzConfig
+
+if TYPE_CHECKING:
+    from .account import AccountInfo
 
 from kalinka_plugin_sdk.datamodel import (
     Album,
@@ -49,19 +55,12 @@ from kalinka_plugin_sdk.inputmodule import (
     DirectUrl,
     InputModule,
     SearchType,
+    SourceUnavailableError,
     TrackInfo,
     TrackSource,
 )
 
 logger = logging.getLogger(__name__.split(".")[-1])
-
-
-class AuthenticationError(Exception):
-    pass
-
-
-class IneligibleError(Exception):
-    pass
 
 
 class InvalidAppIdError(Exception):
@@ -70,6 +69,11 @@ class InvalidAppIdError(Exception):
 
 class InvalidAppSecretError(Exception):
     pass
+
+
+class AppSecretPendingError(Exception):
+    """No app secret is selected yet: the account check that picks one has
+    not completed. The message is shown to users."""
 
 
 class InvalidQuality(Exception):
@@ -103,8 +107,6 @@ class RetryTransport(httpx.AsyncHTTPTransport):
         self.backoff_factor = 0.5
 
     async def handle_async_request(self, request) -> httpx.Response:
-        import asyncio
-
         attempt = 1
         while True:
             try:
@@ -218,17 +220,23 @@ class LastUpdate(BaseModel):
 
 
 class QobuzClient:
-    def __init__(self, app_id, secrets):
-        logger.info(f"Logging...")
-        self.secrets = secrets
-        self.id = str(app_id)
+    """Qobuz REST API client.
+
+    The account credential comes from ``auth`` on every request, so one
+    client serves every account the plugin links over its lifetime.
+    """
+
+    def __init__(self, auth: QobuzAuth, transport: Optional[httpx.AsyncBaseTransport] = None):
+        self._auth = auth
+        self.id: Optional[str] = None
+        self.secrets: list[str] = []
         self.session = httpx.AsyncClient(
+            auth=auth,
             # 2 attempts (1 initial + 1 retry), 3s per attempt. RetryTransport
             # already retries connect failures, so httpx-level retries=0 avoids
             # multiplying the worst-case wait.
-            transport=RetryTransport(
-                read_retries=2, retries=0, http2=True, http1=False
-            ),
+            transport=transport
+            or RetryTransport(read_retries=2, retries=0, http2=True, http1=False),
             # 3s read/write/pool keeps runtime calls fast-failing; connect gets a
             # longer budget so a slow-to-come-up network doesn't fail startup.
             timeout=httpx.Timeout(3.0, connect=15.0),
@@ -236,93 +244,92 @@ class QobuzClient:
         self.session.headers.update(
             {
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
-                "X-App-Id": self.id,
             }
         )
 
         self.base = "https://www.qobuz.com/api.json/0.2/"
         self.sec = None
+        self.user_id = None
+        self.credential_id = None
+        self.label = ""
+        self.reset_caches()
+
+    def configure_app(self, app_id: str, secrets: list[str]) -> None:
+        """Identify requests as the Qobuz web player, whose bundle supplied these."""
+        self.id = str(app_id)
+        self.secrets = list(secrets)
+        self.session.headers["X-App-Id"] = self.id
+
+    def require_account(self) -> None:
+        """@throw AuthenticationError while no account is linked, as any request would."""
+        self._auth.require_credential()
+
+    def install_account(self, account: "AccountInfo") -> None:
+        """Adopt the account that streaming reports and playlist ownership refer to."""
+        self.user_id = account.user_id
+        self.credential_id = account.credential_id
+        self.label = account.label
+
+    def reset_caches(self) -> None:
+        """Forget everything learnt from the previous account."""
         # a short living cache to be used for reporting purposes
         self.track_url_response_cache = {}
         self.last_update = LastUpdate()
         self.cached = {"albums": {}, "artists": {}, "tracks": {}, "playlists": {}}
 
-    def auth(self, user_auth_token: str):
-        """Attach the pre-issued user auth token to the session.
+    async def aclose(self) -> None:
+        await self.session.aclose()
 
-        The token is obtained out-of-band from the Qobuz web app
-        (play.qobuz.com) — users copy it from the browser devtools and paste
-        it into the plugin config. All subsequent API calls ride on this
-        header; a bad/expired token surfaces as 401 at the first real call.
-        """
-        if not user_auth_token:
-            raise AuthenticationError(
-                "Qobuz user auth token is not configured."
-            )
-        self.uat = user_auth_token
-        self.session.headers.update({"X-User-Auth-Token": self.uat})
-
-    async def load_user_info(self):
-        """Resolve user_id, credential_id, and membership label from the UAT.
-
-        Required by streaming reports (qobuz_reporter) and by playlist
-        ownership filtering (playlist_user_list). Calls user/login with the
-        token rather than email+password — Qobuz returns the same user object
-        in both modes.
-        """
-        r = await self.session.get(
-            self.base + "user/login",
-            params={"app_id": self.id, "user_auth_token": self.uat},
+    async def test_secret(self, sec, track_id) -> bool:
+        """Whether Qobuz accepts ``sec``'s signature. Only a 400 means it does
+        not: a missing track or a refused account says nothing about the secret."""
+        response = await self.session.get(
+            self.base + "track/getFileUrl",
+            params=self._file_url_params(track_id, 5, sec),
         )
-        if r.status_code == 401:
-            raise AuthenticationError("Invalid or expired Qobuz user auth token.")
-        if r.is_error:
-            # Not raise_for_status(): its message quotes the URL, token and all.
-            raise AuthenticationError(f"Qobuz login failed: HTTP {r.status_code}")
-        usr_info = r.json()
-        if not usr_info["user"]["credential"]["parameters"]:
-            raise IneligibleError("Free accounts are not eligible to play tracks.")
-        self.label = usr_info["user"]["credential"]["parameters"]["short_label"]
-        logger.info(f"Membership: {self.label}")
-        self.credential_id = usr_info["user"]["credential"]["id"]
-        self.user_id = usr_info["user"]["id"]
+        return response.status_code != 400
 
-    async def test_secret(self, sec):
-        try:
-            await self.get_track_url(track_id=5966783, fmt_id=5, sec=sec)
-            return True
-        except InvalidAppSecretError:
-            return False
+    async def cfg_setup(self, track_id):
+        """Select the app secret, probing with ``track_id``.
 
-    async def cfg_setup(self):
+        The secret in use stays until another is found, so streams keep
+        working while a check of the shared client is under way or fails.
+        """
         for secret in self.secrets:
             # Falsy secrets
             if not secret:
                 continue
 
-            if await self.test_secret(secret):
+            if await self.test_secret(secret, track_id):
                 self.sec = secret
-                break
+                return
 
-        if self.sec is None:
-            raise InvalidAppSecretError("Can't find any valid app secret.")
+        raise InvalidAppSecretError("Can't find any valid app secret.")
 
-    async def get_track_url(self, track_id, fmt_id=5, sec=None):
-        epoint = "track/getFileUrl"
+    def _file_url_params(self, track_id, fmt_id, sec) -> dict:
         unix = time.time()
-        if int(fmt_id) not in (5, 6, 7, 27):
-            raise InvalidQuality("Invalid quality id: choose between 5, 6, 7 or 27")
         r_sig = "trackgetFileUrlformat_id{}intentstreamtrack_id{}{}{}".format(
-            fmt_id, track_id, unix, self.sec if sec is None else sec
+            fmt_id, track_id, unix, sec
         )
-        r_sig_hashed = hashlib.md5(r_sig.encode("utf-8")).hexdigest()
-        params = {
+        return {
             "request_ts": unix,
-            "request_sig": r_sig_hashed,
+            "request_sig": hashlib.md5(r_sig.encode("utf-8")).hexdigest(),
             "track_id": track_id,
             "format_id": fmt_id,
             "intent": "stream",
         }
+
+    async def get_track_url(self, track_id, fmt_id=5, sec=None):
+        epoint = "track/getFileUrl"
+        if int(fmt_id) not in (5, 6, 7, 27):
+            raise InvalidQuality("Invalid quality id: choose between 5, 6, 7 or 27")
+        secret = self.sec if sec is None else sec
+        if secret is None:
+            # Signing with no secret only earns a 400 that reads as a bad
+            # secret. No link, or an expired one, is the better reason.
+            self.require_account()
+            raise AppSecretPendingError(STILL_CONNECTING)
+        params = self._file_url_params(track_id, fmt_id, secret)
 
         r = None
         for _ in range(3):
@@ -436,7 +443,15 @@ class QobuzClient:
         return {type_name: retval}
 
 
-async def get_client(config: QobuzConfig) -> QobuzClient:
+@dataclass(frozen=True)
+class AppBundle:
+    """What the Qobuz web player's bundle says about the app it ships."""
+
+    app_id: str
+    secrets: list[str]
+
+
+async def load_app_bundle() -> AppBundle:
     # The web-bundle fetch is the slowest part of Qobuz startup; bracket it
     # with explicit INFO logs so the server log makes it obvious when this
     # phase starts, finishes, and how long it took.
@@ -451,46 +466,60 @@ async def get_client(config: QobuzConfig) -> QobuzClient:
         app_id,
         len(secrets),
     )
-
-    client = QobuzClient(app_id, secrets)
-    client.auth(config.user_auth_token)
-    await _load_user_info_resilient(client)
-    await client.cfg_setup()
-    return client
+    return AppBundle(app_id=app_id, secrets=secrets)
 
 
-# A setup failure disables the plugin for the whole session, so retry the first
-# authenticated call while the network is still coming up at boot.
-_STARTUP_CONNECT_ATTEMPTS = 5
-_STARTUP_CONNECT_BACKOFF = 2.0
-_STARTUP_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
-
-
-async def _load_user_info_resilient(client: QobuzClient) -> None:
-    for attempt in range(1, _STARTUP_CONNECT_ATTEMPTS + 1):
-        try:
-            await client.load_user_info()
-            return
-        except _STARTUP_CONNECT_ERRORS as exc:
-            if attempt >= _STARTUP_CONNECT_ATTEMPTS:
-                raise
-            delay = _STARTUP_CONNECT_BACKOFF * attempt
-            logger.warning(
-                "Qobuz startup connect failed (attempt %d/%d): %r; retrying in %.1fs",
-                attempt,
-                _STARTUP_CONNECT_ATTEMPTS,
-                exc,
-                delay,
-            )
-            await asyncio.sleep(delay)
+REJECTED_LINK = "Qobuz did not accept this player's link. If it persists, unpair Qobuz and pair again."
+STILL_CONNECTING = "Qobuz is still connecting to your account. Try again in a moment."
 
 
 async def qobuz_source_retriever(qobuz_client, id, format_id) -> TrackSource:
     # Qobuz issues a time-limited URL the renderer fetches for itself; the
     # server has no copy of the file to serve in its place.
-    track = await qobuz_client.get_track_url(id, fmt_id=format_id)
+    try:
+        track = await qobuz_client.get_track_url(id, fmt_id=format_id)
+    except (AuthenticationError, AppSecretPendingError) as exc:
+        raise SourceUnavailableError(str(exc)) from None
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            raise SourceUnavailableError(REJECTED_LINK) from None
+        raise
     return TrackSource(
         source=DirectUrl(url=track["url"]), format=track["mime_type"]
+    )
+
+
+def _when_unlinked(fallback: Callable[[dict], object]):
+    """Answer ``fallback(call_arguments)`` instead of failing while no account is linked.
+
+    The server merges browse, search and favourites results from every source
+    in one gather, so a Qobuz failure there would blank every source's results.
+    """
+
+    def decorate(method):
+        signature = inspect.signature(method)
+
+        @functools.wraps(method)
+        async def call(self, *args, **kwargs):
+            try:
+                return await method(self, *args, **kwargs)
+            except AuthenticationError:
+                bound = signature.bind(self, *args, **kwargs)
+                bound.apply_defaults()
+                return fallback(bound.arguments)
+
+        return call
+
+    return decorate
+
+
+def _empty_page(arguments: dict) -> BrowseItemList:
+    return EmptyList(arguments["offset"], arguments["limit"])
+
+
+def _no_filter_values(arguments: dict) -> FilterValueList:
+    return FilterValueList(
+        offset=arguments["offset"], limit=arguments["limit"], total=0, items=[]
     )
 
 
@@ -562,11 +591,13 @@ class QobuzInputModule(InputModule):
     def module_name(self) -> str:
         return "Qobuz"
 
+    @_when_unlinked(_empty_page)
     async def search(
         self, type: SearchType, query: str, offset=0, limit=50
     ) -> BrowseItemList:
         return await self._search_items(type, query, offset, limit)
 
+    @_when_unlinked(_empty_page)
     async def browse(
         self,
         entity_id: EntityId,
@@ -670,6 +701,7 @@ class QobuzInputModule(InputModule):
             items=self._albums_to_browse_category(response.json()["albums"]["items"]),
         )
 
+    @_when_unlinked(_empty_page)
     async def list_favorite(
         self, type: SearchType, filter: str, offset: int = 0, limit: int = 50
     ) -> BrowseItemList:
@@ -707,6 +739,8 @@ class QobuzInputModule(InputModule):
         genre_ids = _genre_values(endpoint, or_unfiltered(filter))
 
         if endpoint == "root":
+            # Every shelf needs an account, so an unlinked Qobuz lists none.
+            self.qobuz_client.require_account()
             all_items = [
                 BrowseItem(
                     id=catalog_id("recent-releases"),
@@ -1375,6 +1409,7 @@ class QobuzInputModule(InputModule):
             track_count=playlist["tracks_count"],
         )
 
+    @_when_unlinked(lambda arguments: FavoriteIds())
     async def get_favorite_ids(self) -> FavoriteIds:
         response = await self.qobuz_client.session.get(
             self.qobuz_client.base + "favorite/getUserFavoriteIds",
@@ -1444,6 +1479,7 @@ class QobuzInputModule(InputModule):
         if "status" not in rjson or rjson["status"] != "success":
             raise Exception(f"Failed to remove from favorite: {response.text}")
 
+    @_when_unlinked(_no_filter_values)
     async def list_filter_values(
         self,
         catalog_id: EntityId,
@@ -1549,6 +1585,7 @@ class QobuzInputModule(InputModule):
             ),
         )
 
+    @_when_unlinked(_empty_page)
     async def playlist_user_list(
         self, offset: int = 0, limit: int = 25
     ) -> BrowseItemList:
