@@ -25,27 +25,42 @@ class QobuzConfig(ModuleConfig):
         title="Qobuz",
         description=(
             "Streaming from a Qobuz subscription, up to studio-quality "
-            "hi-res. Needs your Qobuz account token."
+            "hi-res. Link your account by choosing this player in the Qobuz app."
         ),
         frozen=True,
         exclude=True,
-    )
-    user_auth_token: str = Field(
-        default="",
-        title="User auth token",
-        description=(
-            "Qobuz X-User-Auth-Token. Obtain from the web app: sign in at "
-            "play.qobuz.com, then copy the token from any authenticated "
-            "request header in the browser devtools Network tab."
-        ),
-        json_schema_extra={
-            "widget": "password",
-            "importance": "simple",
-            "setup": "required",
-        },
     )
     format: QobuzAudioFormat = Field(
         default=QobuzAudioFormat.HIRES_192,
         title="Audio quality",
         json_schema_extra={"importance": "simple", "setup": "prompt"},
+    )
+    unpair: bool = Field(
+        default=False,
+        title="Unpair Qobuz account on next restart",
+        json_schema_extra={
+            "help": (
+                "Forget the linked Qobuz account and its tokens, then wait "
+                "for a new pairing from the Qobuz app. Resets itself once done."
+            ),
+            # One-shot trigger: the framework resets this (persist-first)
+            # before the plugin acts, so it fires at most once per arming.
+            "one_shot": True,
+            "importance": "simple",
+        },
+    )
+    connect_device_name: str = Field(
+        default="",
+        title="Qobuz Connect device name",
+        description=(
+            "Name shown in the Qobuz app's device picker while pairing. "
+            "Empty uses \"Kalinka (<hostname>)\"."
+        ),
+    )
+    connect_port: int = Field(
+        default=8183,
+        ge=1024,
+        le=65535,
+        title="Qobuz Connect pairing port",
+        description="TCP port the Qobuz app connects to while pairing.",
     )

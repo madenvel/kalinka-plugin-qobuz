@@ -1,7 +1,7 @@
-"""get_client() must clearly log the web-bundle load (start + finish).
+"""load_app_bundle() must clearly log the web-bundle load (start + finish).
 
-The bundle fetch/parse is the slowest, blocking part of Qobuz startup, so the
-server log needs an obvious "started" and "finished (in Ns)" marker around it.
+The bundle fetch/parse is the slowest part of Qobuz startup, so the server
+log needs an obvious "started" and "finished (in Ns)" marker around it.
 These assert those markers are emitted, without touching the network.
 """
 
@@ -11,7 +11,6 @@ import logging
 import pytest
 
 from kalinka_plugin_qobuz import qobuz
-from kalinka_plugin_qobuz.config_model import QobuzConfig
 
 
 class _FakeBundle:
@@ -22,34 +21,17 @@ class _FakeBundle:
         return {"a": "secret_a", "b": ""}  # falsy entries are filtered out
 
 
-class _FakeClient:
-    def __init__(self, app_id, secrets):
-        self.app_id = app_id
-        self.secrets = secrets
-        self.sec = None
-
-    def auth(self, token):
-        self.token = token
-
-    async def load_user_info(self):
-        pass
-
-    async def cfg_setup(self):
-        self.sec = self.secrets[0]
-
-
 @pytest.fixture
 def _stub_network(monkeypatch):
     async def fake_load_bundle():
         return _FakeBundle()
 
     monkeypatch.setattr(qobuz, "load_bundle", fake_load_bundle)
-    monkeypatch.setattr(qobuz, "QobuzClient", _FakeClient)
 
 
 def test_bundle_load_is_logged_start_and_finish(_stub_network, caplog):
     with caplog.at_level(logging.INFO, logger="qobuz"):
-        asyncio.run(qobuz.get_client(QobuzConfig()))
+        bundle = asyncio.run(qobuz.load_app_bundle())
 
     messages = [r.getMessage() for r in caplog.records]
     started = [m for m in messages if "Loading Qobuz web bundle" in m]
@@ -60,11 +42,12 @@ def test_bundle_load_is_logged_start_and_finish(_stub_network, caplog):
     # The finish line reports the elapsed time and what was scraped.
     assert "app id 123456789" in finished[0]
     assert "1 secret(s)" in finished[0]  # only the truthy secret counts
+    assert bundle == qobuz.AppBundle(app_id="123456789", secrets=["secret_a"])
 
 
 def test_finish_logged_after_start(_stub_network, caplog):
     with caplog.at_level(logging.INFO, logger="qobuz"):
-        asyncio.run(qobuz.get_client(QobuzConfig()))
+        asyncio.run(qobuz.load_app_bundle())
 
     order = [
         i
