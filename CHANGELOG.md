@@ -2,6 +2,16 @@
 
 Curated, user-facing notes per release. Add a `## <version>` section before tagging — the release workflow puts the matching section into the GitHub Release body.
 
+## 5.0.1
+
+### Fixed
+- **Switching the Qobuz app to another device stops Kalinka.** Kalinka used to play on, and the Qobuz app no longer showed it. Now Kalinka stops and its own queue takes the output back, not playing. The same happens when the app takes playback onto the phone's own speakers.
+- After reconnecting, Kalinka carries on playing only if the Qobuz Connect session is the same and no other device took over meanwhile.
+- Chosen again after being switched away, Kalinka shows as stopped until the Qobuz app says what to play. It no longer shows the last state it had.
+
+### Added
+- The server log now records each change of the device the Qobuz Connect session plays on, with this player's own number. It also records every play, pause, seek or track the Qobuz app asks for, and a warning when the app asks to play with no track to play. Run the server with `--debug` to also log every message from the Qobuz Connect cloud.
+
 ## 5.0.0
 
 ### Changed

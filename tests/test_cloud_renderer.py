@@ -267,6 +267,39 @@ async def test_the_clouds_echo_of_a_report_changes_nothing(harness):
     assert len(harness.direct.holds) == 1
 
 
+async def test_what_the_cloud_asks_for_is_logged_but_not_its_echoes(harness, caplog):
+    with caplog.at_level(logging.INFO, logger="cloud_renderer"):
+        await harness.cast(position=15000)
+        await harness.set_state(state=PAUSED)
+        await harness.set_state(following=(3, 333))
+
+    assert [r.getMessage() for r in caplog.records if "asks:" in r.getMessage()] == [
+        "Qobuz Connect asks: playing, at 15000 ms, track 111 (item 1)",
+        "Qobuz Connect asks: paused",
+    ]
+
+
+async def test_the_handoff_replay_is_logged_as_ignored(harness, caplog):
+    await harness.activate()
+    await harness.set_state(state=PLAYING, current=(1, 111))
+
+    with caplog.at_level(logging.INFO, logger="cloud_renderer"):
+        await harness.set_state(state=PAUSED, position=0)
+
+    assert harness.direct.hold.calls[-1][0] == "play"
+    assert "ignored as the replay of the handoff" in caplog.text
+
+
+async def test_a_play_request_with_nothing_to_play_is_logged(harness, caplog):
+    await harness.activate()
+
+    with caplog.at_level(logging.WARNING, logger="cloud_renderer"):
+        await harness.set_state(state=PLAYING, position=5000)
+
+    assert harness.direct.holds == []
+    assert "names no track and none is loaded" in caplog.text
+
+
 async def test_nothing_is_reported_while_another_renderer_is_active(harness):
     await harness.set_state(state=PLAYING, current=(1, 111))
 
@@ -592,6 +625,34 @@ async def test_a_set_inactive_replayed_after_the_load_is_ignored(harness):
 
     assert harness.renderer.active
     assert harness.direct.hold.active
+
+
+async def test_standing_down_releases_a_hold_taken_before_becoming_the_renderer(harness):
+    await harness.set_state(state=PLAYING, current=(1, 111))
+
+    await harness.renderer.on_active_renderer(False)
+    await harness.settle()
+
+    assert harness.direct.hold.calls[-1] == ("release",)
+
+
+async def test_a_player_told_to_stand_down_while_idle_reports_stopped_on_its_return(harness):
+    await harness.set_state(state=PAUSED)
+
+    await harness.renderer.on_active_renderer(False)
+    await harness.activate()
+
+    assert harness.last().playing_state == STOPPED
+
+
+async def test_a_player_that_stood_down_reports_stopped_on_its_return(harness):
+    await harness.cast()
+    await harness.renderer.on_active_renderer(False)
+
+    await harness.renderer.on_set_active(True)
+    await harness.settle()
+
+    assert harness.last().playing_state == STOPPED
 
 
 async def test_a_track_that_cannot_be_fetched_is_reported_stopped(harness):
