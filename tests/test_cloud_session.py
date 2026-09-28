@@ -1,5 +1,6 @@
 """Joining a Qobuz Connect session and routing what the cloud says."""
 
+import logging
 import uuid
 
 import pytest
@@ -83,11 +84,22 @@ class Harness:
     async def hear(self, **fields):
         await self.session.on_messages([qc.QConnectMessage(**fields)])
 
-    async def session_state(self, active_renderer_id=None):
-        body = qc.CtrlSessionStateMessage(session_uuid=uuid.UUID(SESSION_UUID).bytes)
+    async def session_state(self, active_renderer_id=None, session_uuid=SESSION_UUID):
+        body = qc.CtrlSessionStateMessage(session_uuid=uuid.UUID(session_uuid).bytes)
         if active_renderer_id is not None:
             body.active_renderer_id = active_renderer_id
         await self.hear(message_type=qc.SRVR_CTRL_SESSION_STATE, srvr_ctrl_session_state=body)
+
+    async def active_renderer(self, renderer_id):
+        await self.hear(
+            message_type=qc.SRVR_CTRL_ACTIVE_RENDERER_CHANGED,
+            srvr_ctrl_active_renderer_changed=qc.CtrlActiveRendererChangedMessage(
+                active_renderer_id=renderer_id
+            ),
+        )
+
+    def told_active(self):
+        return [c[1] for c in self.playback.calls if c[0] == "active_renderer"]
 
     async def add_renderer(self, renderer_id, device_uuid=DEVICE_UUID, **info):
         device = qc.DeviceInfoMessage(**info)
@@ -168,6 +180,33 @@ async def test_its_own_renderer_id_is_learnt_from_the_device_uuid(harness):
     assert harness.session.renderer_id == 7
 
 
+async def test_the_renderer_list_heard_before_the_session_is_named_is_kept(harness):
+    """The cloud lists the session's renderers first, then names the session."""
+    harness.session.join_as_active_next()
+    await harness.session.on_connected()
+    await harness.add_renderer(4)
+    await harness.session_state(active_renderer_id=4)
+
+    await harness.active_renderer(1)
+
+    assert harness.session.renderer_id == 4
+    assert harness.told_active() == [False]
+
+
+@pytest.mark.parametrize("reconnect", [True, False])
+async def test_an_id_from_another_session_is_forgotten(harness, reconnect):
+    await harness.session.on_connected()
+    await harness.add_renderer(7)
+    await harness.session_state()
+    if reconnect:
+        # A session this player has not joined does not list it.
+        await harness.session.on_connected()
+
+    await harness.session_state(session_uuid=str(uuid.uuid4()))
+
+    assert harness.session.renderer_id is None
+
+
 async def test_without_a_uuid_the_name_identifies_it(harness):
     await harness.add_renderer(9, device_uuid=None, friendly_name="Kalinka (living room)", brand="Kalinka")
 
@@ -177,18 +216,204 @@ async def test_without_a_uuid_the_name_identifies_it(harness):
 async def test_the_active_renderer_is_told_to_the_playback(harness):
     await harness.add_renderer(7)
 
+    await harness.active_renderer(7)
+    await harness.active_renderer(3)
+
+    assert harness.told_active() == [True, False]
+
+
+@pytest.mark.parametrize("own_id", [7, None])
+async def test_no_active_renderer_is_never_this_player(harness, own_id):
+    """The Qobuz app took playback onto its own speakers: stop here."""
+    if own_id is not None:
+        await harness.add_renderer(own_id)
+
+    await harness.active_renderer(-1)
+
+    assert harness.told_active() == [False]
+
+
+async def test_a_handoff_is_not_undone_by_the_session_state_it_answers(harness):
+    harness.session.join_as_active_next()
+    await harness.session.on_connected()
+
+    # Named before this player claimed playback: the app played on its own.
+    await harness.session_state(active_renderer_id=-1)
+
+    assert ("set_active", True) in harness.playback.calls
+    assert harness.told_active() == []
+
+
+async def _playing_then_reconnected(harness):
+    await harness.session.on_connected()
+    await harness.session_state()
+    await harness.add_renderer(7)
+    harness.playback.active = True
+    harness.playback.calls.clear()
+    await harness.session.on_connected()
+
+
+@pytest.mark.parametrize("named", [-1, 7])
+async def test_a_reconnect_keeps_playing_through_the_session_state_it_answers(harness, named):
+    await _playing_then_reconnected(harness)
+
+    await harness.session_state(active_renderer_id=named)
+
+    assert harness.joins()[-1].is_active is True
+    assert harness.told_active() == []
+
+
+async def test_a_reconnect_after_another_renderer_took_over_leaves_it_there(harness):
+    await _playing_then_reconnected(harness)
+
+    await harness.session_state(active_renderer_id=3)
+
+    assert harness.joins()[-1].is_active is False
+    # Told before it joins, so it does not report playing to the session.
+    calls = [c[0] for c in harness.playback.calls]
+    assert calls.index("active_renderer") < calls.index("joined")
+    assert harness.told_active() == [False]
+
+
+async def test_a_connection_that_dropped_before_joining_does_not_end_the_reconnect(harness):
+    await _playing_then_reconnected(harness)
+
+    await harness.session.on_connected()
+    await harness.session_state(active_renderer_id=-1)
+
+    assert harness.joins()[-1].is_active is True
+    assert harness.told_active() == []
+
+
+async def test_a_new_session_is_joined_as_available_even_while_playing(harness):
+    await _playing_then_reconnected(harness)
+    await harness.add_renderer(9)
+
+    await harness.session_state(active_renderer_id=3, session_uuid=str(uuid.uuid4()))
+
+    rejoin = harness.joins()[-1]
+    assert (rejoin.is_active, rejoin.reason) == (False, 1)
+    assert harness.told_active() == [False]
+
+
+async def test_a_new_session_naming_no_renderer_stands_a_playing_player_down(harness):
+    await _playing_then_reconnected(harness)
+
+    await harness.session_state(session_uuid=str(uuid.uuid4()))
+
+    assert harness.joins()[-1].is_active is False
+    assert harness.told_active() == [False]
+
+
+async def test_a_session_naming_this_player_is_joined_as_its_active_renderer(harness):
+    """Restarted while the Qobuz app still has this player selected."""
+    await harness.session.on_connected()
+    await harness.add_renderer(4)
+
+    await harness.session_state(active_renderer_id=4)
+
+    assert harness.joins()[-1].is_active is True
+    assert ("set_active", True) in harness.playback.calls
+    assert harness.told_active() == []
+
+
+async def test_a_reconnect_after_losing_its_id_does_not_claim_over_another(harness):
+    await harness.session.on_connected()
+    await harness.session_state()
+    await harness.add_renderer(7)
+    harness.playback.active = True
     await harness.hear(
-        message_type=qc.SRVR_CTRL_ACTIVE_RENDERER_CHANGED,
-        srvr_ctrl_active_renderer_changed=qc.CtrlActiveRendererChangedMessage(active_renderer_id=7),
+        message_type=qc.SRVR_CTRL_REMOVE_RENDERER,
+        srvr_ctrl_remove_renderer=qc.CtrlRemoveRendererMessage(renderer_id=7),
     )
+    await harness.session.on_connected()
+
+    await harness.session_state(active_renderer_id=3)
+
+    assert harness.joins()[-1].is_active is False
+    assert harness.told_active() == [False]
+
+
+async def test_a_reconnect_the_session_names_as_active_claims_it(harness):
+    await harness.session.on_connected()
+    await harness.session_state()
+    await harness.add_renderer(7)
+    await harness.session.on_connected()
+
+    await harness.session_state(active_renderer_id=7)
+
+    assert harness.joins()[-1].is_active is True
+    assert ("set_active", True) in harness.playback.calls
+    assert harness.told_active() == []
+
+
+async def test_coming_back_to_a_session_on_the_same_connection_is_no_reconnect(harness):
+    other = str(uuid.uuid4())
+    await harness.session.on_connected()
+    await harness.session_state()
+    await harness.session_state(session_uuid=other)
+    harness.playback.active = True
+
+    await harness.session_state()
+
+    rejoin = harness.joins()[-1]
+    assert (rejoin.is_active, rejoin.reason) == (False, 1)
+
+
+async def test_an_active_renderer_change_naming_nothing_means_none(harness):
+    await harness.add_renderer(7)
+    await harness.active_renderer(7)
+
     await harness.hear(
         message_type=qc.SRVR_CTRL_ACTIVE_RENDERER_CHANGED,
-        srvr_ctrl_active_renderer_changed=qc.CtrlActiveRendererChangedMessage(active_renderer_id=3),
+        srvr_ctrl_active_renderer_changed=qc.CtrlActiveRendererChangedMessage(),
     )
 
-    assert [c for c in harness.playback.calls if c[0] == "active_renderer"] == [
-        ("active_renderer", True),
-        ("active_renderer", False),
+    assert harness.told_active() == [True, False]
+
+
+async def test_a_joined_session_naming_no_renderer_stops_it_here(harness):
+    harness.session.join_as_active_next()
+    await harness.session.on_connected()
+    await harness.session_state(active_renderer_id=-1)
+
+    await harness.session_state(active_renderer_id=-1)
+
+    assert harness.told_active() == [False]
+
+
+async def test_joining_as_available_hears_who_plays(harness):
+    await harness.session.on_connected()
+
+    await harness.session_state(active_renderer_id=-1)
+
+    assert harness.joins()[0].is_active is False
+    assert harness.told_active() == [False]
+
+
+async def test_every_message_heard_is_traced_at_debug(harness, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    await harness.active_renderer(7)
+    await harness.hear(message_type=9999)
+
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG] == [
+        "Qobuz Connect cloud sent SRVR_CTRL_ACTIVE_RENDERER_CHANGED",
+        "Qobuz Connect cloud sent 9999",
+    ]
+
+
+async def test_each_change_of_active_renderer_is_logged_once(harness, caplog):
+    caplog.set_level(logging.INFO)
+    await harness.add_renderer(7)
+
+    for renderer_id in (7, 7, -1, -1, 3):
+        await harness.active_renderer(renderer_id)
+
+    assert [r.getMessage() for r in caplog.records if "session" in r.getMessage()] == [
+        "Qobuz Connect session plays on renderer 7 (this player: 7)",
+        "Qobuz Connect session has no active renderer",
+        "Qobuz Connect session plays on renderer 3 (this player: 7)",
     ]
 
 

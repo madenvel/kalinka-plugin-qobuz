@@ -300,7 +300,7 @@ class ConnectRenderer:
     async def _active_renderer(self, ours: bool) -> None:
         if ours:
             await self._set_active(True)
-        elif self._active:
+        else:
             await self._deactivate()
 
     async def _set_state(self, message: qc.RendererSetStateMessage) -> None:
@@ -313,6 +313,8 @@ class ConnectRenderer:
         has_track = message.HasField("current_track")
         if not (has_state or has_position or has_track):
             return
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("Qobuz Connect asks: %s", _describe(message))
         state = message.playing_state if has_state else None
         position = message.current_position if has_position else None
         if has_track:
@@ -324,6 +326,7 @@ class ConnectRenderer:
             await self._resume(position)
         elif state in (PLAYING_PAUSED, PLAYING_STOPPED):
             if self._handoff_echo(position):
+                logger.info("Qobuz Connect: ignored as the replay of the handoff")
                 return
             if state == PLAYING_PAUSED:
                 await self._pause()
@@ -532,6 +535,8 @@ class ConnectRenderer:
             if self._current is not None:
                 at = position if position is not None else self._position()
                 await self._load(self._current, at, PLAYING_PLAYING)
+            else:
+                logger.warning("Qobuz Connect asks to play, but names no track and none is loaded")
             return
         await hold.resume()
         if position is not None:
@@ -559,8 +564,12 @@ class ConnectRenderer:
         await hold.seek(position_ms)
 
     async def _deactivate(self) -> None:
+        # Chosen again, it reports stopped until the cloud names what to play.
+        self._intent = PLAYING_STOPPED
+        if not self._active and self._hold is None:
+            return
         self._active = False
-        logger.info("Qobuz Connect: another device is the active renderer now")
+        logger.info("Qobuz Connect: this player is no longer the active renderer")
         await self._release()
 
     async def _ensure_hold(self) -> DirectPlaybackSession:
@@ -716,6 +725,25 @@ class ConnectRenderer:
     async def _report_progress(self) -> None:
         if self._hold is not None and self._intent == PLAYING_PLAYING:
             await self._report()
+
+
+_PLAYING_NAMES = {PLAYING_STOPPED: "stopped", PLAYING_PLAYING: "playing", PLAYING_PAUSED: "paused"}
+
+
+def _describe(message: qc.RendererSetStateMessage) -> str:
+    """What a SET_STATE changes, for the log."""
+    parts = []
+    if message.HasField("playing_state"):
+        state = message.playing_state
+        parts.append(_PLAYING_NAMES.get(state, f"state {state}"))
+    if message.HasField("current_position"):
+        parts.append(f"at {message.current_position} ms")
+    if message.HasField("current_track"):
+        item = item_of(message.current_track)
+        parts.append(
+            f"track {item.track_id} (item {item.queue_item_id})" if item else "no track"
+        )
+    return ", ".join(parts)
 
 
 def _percent(volume: Optional[DeviceVolume]) -> Optional[int]:

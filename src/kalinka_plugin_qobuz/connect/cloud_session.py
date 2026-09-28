@@ -78,7 +78,7 @@ class Playback(Protocol):
     async def on_set_active(self, active: bool) -> None: ...
 
     async def on_active_renderer(self, ours: bool) -> None:
-        """The session named its active renderer: this player, or another."""
+        """The session named its active renderer: this player, or another, or none."""
         ...
 
     async def on_shown_volume(self, percent: int) -> None:
@@ -103,9 +103,15 @@ class ConnectSession:
         self._playback: Optional[Playback] = None
         self.session_uuid = ""
         self.renderer_id: Optional[int] = None
+        # This connection's renderer list named this player: it lists the
+        # session's renderers before naming the session.
+        self._listed_here = False
         self._joined_session = ""
         self._join_active_next = False
-        self._was_joined = False
+        # The session last joined, on this connection or one before.
+        self._last_joined = ""
+        # The session's active renderer as last logged; -1 is none.
+        self._named_active: Optional[int] = None
 
     def attach(self, playback: Playback) -> None:
         self._playback = playback
@@ -115,8 +121,9 @@ class ConnectSession:
         self._join_active_next = True
 
     async def on_connected(self) -> None:
-        self._was_joined = bool(self._joined_session)
+        self._listed_here = False
         self._joined_session = ""
+        self._named_active = None
         await self._send(
             [
                 qc.QConnectMessage(
@@ -131,6 +138,8 @@ class ConnectSession:
 
     async def on_messages(self, messages: list[qc.QConnectMessage]) -> None:
         for message in messages:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Qobuz Connect cloud sent %s", _type_name(message.message_type))
             await self._dispatch(message)
 
     async def send_state(self, state: qc.RendererStateMessage) -> bool:
@@ -214,11 +223,15 @@ class ConnectSession:
             self._consider_renderer(body.renderer_id, body.device_info)
         elif kind == qc.SRVR_CTRL_REMOVE_RENDERER:
             if message.srvr_ctrl_remove_renderer.renderer_id == self.renderer_id:
+                logger.info(
+                    "Qobuz Connect no longer lists this player as renderer %d", self.renderer_id
+                )
                 self.renderer_id = None
         elif kind == qc.SRVR_CTRL_ACTIVE_RENDERER_CHANGED:
-            await self._on_active_renderer(
-                message.srvr_ctrl_active_renderer_changed.active_renderer_id
-            )
+            body = message.srvr_ctrl_active_renderer_changed
+            # Absent names no renderer; read as it is, it would be id 0.
+            named = body.active_renderer_id if body.HasField("active_renderer_id") else -1
+            await self._on_active_renderer(named)
         elif playback is None:
             return
         elif kind == qc.SRVR_RNDR_SET_STATE:
@@ -250,25 +263,47 @@ class ConnectSession:
 
     async def _on_session_state(self, body: qc.CtrlSessionStateMessage) -> None:
         session_uuid = frames.uuid_text(body.session_uuid)
+        named = body.active_renderer_id if body.HasField("active_renderer_id") else None
         if session_uuid and session_uuid != self._joined_session:
-            if session_uuid != self.session_uuid:
-                # Renderer ids are the session's own: the last one's may be
-                # another device's here.
+            # Renderer ids are the session's own: one from another session may
+            # be another device's here. The list this connection heard before
+            # it joined a session is this session's.
+            listed_for_this = self._listed_here and not self._joined_session
+            if session_uuid != self.session_uuid and not listed_for_this:
                 self.renderer_id = None
+                self._named_active = None
             self.session_uuid = session_uuid
             self._on_established()
-            await self._join_as_renderer()
-        if body.HasField("active_renderer_id"):
-            await self._on_active_renderer(body.active_renderer_id)
+            await self._join_as_renderer(named)
+        elif named is not None:
+            await self._on_active_renderer(named)
 
-    async def _join_as_renderer(self) -> None:
+    async def _join_as_renderer(self, named: Optional[int]) -> None:
+        """Join the session as a renderer, and take in whom it names as active.
+
+        A join that claims playback answers the session's state, so the
+        renderer that state names, often none, is the one from before the claim
+        and is passed over. Otherwise it is taken in before joining, so a player
+        that stands down joins as one that is not playing.
+
+        @param named The renderer the session names as active, if it does.
+        """
         playback = self._playback
         handed_over, self._join_active_next = self._join_active_next, False
-        # A handoff is a new join even on a connection that was up before.
-        reconnecting = self._was_joined and not handed_over
-        is_active = handed_over or (
-            reconnecting and playback is not None and playback.active
-        )
+        # Back in the session it left; a handoff is a new join even then.
+        reconnecting = self.session_uuid == self._last_joined and not handed_over
+        # A renderer named here is this player only by the id the session
+        # listed for it; named, it is the active renderer there already.
+        ours = named is not None and named == self.renderer_id
+        replaced = named is not None and named >= 0 and not ours
+        was_active = playback is not None and playback.active
+        is_active = handed_over or ours or (reconnecting and was_active and not replaced)
+        # Not claiming: whatever it played is not this session's to hear.
+        if not is_active and (named is not None or was_active):
+            if named is not None:
+                self._note_active(named)
+            if playback is not None:
+                await playback.on_active_renderer(False)
         version = self._queue.version
         joined = await self._send(
             [
@@ -298,7 +333,7 @@ class ConnectSession:
         )
         if not joined:
             return
-        self._joined_session = self.session_uuid
+        self._joined_session = self._last_joined = self.session_uuid
         logger.info(
             "Joined Qobuz Connect session %s… as %s renderer",
             self.session_uuid[:8],
@@ -327,15 +362,36 @@ class ConnectSession:
             ours = frames.uuid_text(info.device_uuid) == mine.device_uuid
         else:
             ours = info.friendly_name == mine.friendly_name and info.brand == "Kalinka"
+        if ours:
+            self._listed_here = True
         if ours and self.renderer_id != renderer_id:
             self.renderer_id = renderer_id
             logger.info("Qobuz Connect lists this player as renderer %d", renderer_id)
 
     async def _on_active_renderer(self, active_renderer_id: int) -> None:
+        """The session names its active renderer, or -1 for none.
+
+        None is never this player, even before its own id is known: the Qobuz
+        web player takes it as its cue to play on its own output.
+        """
+        self._note_active(active_renderer_id)
         playback = self._playback
-        if playback is None or self.renderer_id is None or active_renderer_id < 0:
+        if playback is not None and (active_renderer_id < 0 or self.renderer_id is not None):
+            await playback.on_active_renderer(active_renderer_id == self.renderer_id)
+
+    def _note_active(self, active_renderer_id: int) -> None:
+        """Log the session's active renderer when it changes."""
+        if active_renderer_id == self._named_active:
             return
-        await playback.on_active_renderer(active_renderer_id == self.renderer_id)
+        self._named_active = active_renderer_id
+        if active_renderer_id < 0:
+            logger.info("Qobuz Connect session has no active renderer")
+        else:
+            logger.info(
+                "Qobuz Connect session plays on renderer %d (this player: %s)",
+                active_renderer_id,
+                "unknown" if self.renderer_id is None else self.renderer_id,
+            )
 
     def _ask_for_queue(self) -> qc.QConnectMessage:
         version = self._queue.version
@@ -346,3 +402,10 @@ class ConnectSession:
                 action_uuid=uuid.uuid4().bytes,
             ),
         )
+
+
+def _type_name(kind: int) -> str:
+    try:
+        return qc.MessageType.Name(kind)
+    except ValueError:
+        return str(kind)
