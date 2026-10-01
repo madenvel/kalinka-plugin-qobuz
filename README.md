@@ -111,7 +111,7 @@ The *User auth token* setting is gone. A token saved by an older version is igno
 ## Building
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.11+
 - `kalinka-plugin-sdk` package
 - Build tools: `python3-build`, `setuptools`, `setuptools-scm`, `wheel`
 - For Debian packaging: `dpkg-dev`
@@ -192,7 +192,7 @@ python3 -m venv .venv
 
 Add `@<branch>` after `KalinkaPlayer` to test against an SDK that is not on `main` yet.
 
-GitHub runs the same tests on Python 3.10 and 3.13 for every pull request and push to `main` (`.github/workflows/tests.yml`), and a release is built only once they pass. **Tests pass** is the check to require in a ruleset. The SDK comes from KalinkaPlayer's `main`, unless the repository variable `KALINKA_SDK_REF` names another branch or tag.
+GitHub runs the same tests on Python 3.11 and 3.13 for every pull request and push to `main` (`.github/workflows/tests.yml`), and a release is built only once they pass. **Tests pass** is the check to require in a ruleset. The SDK comes from KalinkaPlayer's `main`, unless the repository variable `KALINKA_SDK_REF` names another branch or tag.
 
 ## License
 
