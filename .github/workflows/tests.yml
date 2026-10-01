@@ -5,8 +5,8 @@ name: Tests
 #
 # - Require the "Tests pass" check in a ruleset. It fails unless every Python
 #   version passed; a job skipped because another failed would count as passing.
-# - Python 3.10 is the oldest the plugin supports, 3.13 the newest Kalinka's
-#   own CI runs.
+# - Python 3.11 is the oldest the plugin supports, the floor the SDK and the
+#   server state; 3.13 the newest Kalinka's own CI runs.
 # - The plugin SDK is not on PyPI. It is installed from the KalinkaPlayer repo
 #   at KALINKA_SDK_REF, main unless the repository variable of that name says
 #   otherwise, so a plugin change that needs an unmerged SDK fails here until
@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.13"]
+        python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
         with:

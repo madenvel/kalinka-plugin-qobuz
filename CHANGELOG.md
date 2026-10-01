@@ -9,6 +9,7 @@ Curated, user-facing notes per release. Add a `## <version>` section before tagg
 
 ### Changed
 - Needs Kalinka server 5.5 or newer, which brings plugin SDK 3.6. The package will not install on an older server.
+- Needs Python 3.11 or newer, as the plugin SDK and the Kalinka server do.
 
 ## 5.0.1
 
