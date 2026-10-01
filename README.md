@@ -12,7 +12,7 @@ This is an experimental integration with [Qobuz](https://www.qobuz.com), allowin
 
 ## Installation
 
-The plugin installs on a Kalinka server set up from its `.deb` packages: a Raspberry Pi, any other Debian or Ubuntu machine, or a virtual machine. The package is architecture-independent, so the same file installs on all of them. Version 5 of the plugin needs Kalinka server 5.2 or newer.
+The plugin installs on a Kalinka server set up from its `.deb` packages: a Raspberry Pi, any other Debian or Ubuntu machine, or a virtual machine. The package is architecture-independent, so the same file installs on all of them. Version 5.1 of the plugin needs Kalinka server 5.5 or newer.
 
 ### With the install script
 
@@ -75,6 +75,7 @@ A linked player is a Qobuz Connect speaker. Choose it in the Qobuz app's device 
 - **Kalinka shows what plays.** The mini player and the now-playing screen show the track, its artwork and position, with Qobuz's badge, and the now-playing screen says Qobuz Connect is controlling playback. The queue screen shows the Qobuz Connect queue is the one playing, managed in the Qobuz app, and lists Kalinka's own queue, kept as it was, as not playing.
 - **Both apps control it.** Pause, seek, next and previous work from either app, and each follows the other. Volume from the Qobuz app goes to whatever controls the output's volume in Kalinka, including an amplifier Kalinka drives, and a change made in Kalinka or on the device itself shows in the Qobuz app.
 - **Kalinka takes the output back when you play from it.** Playing anything from Kalinka's queue stops the Qobuz playback, and the Qobuz app shows it stopped. Stopping from Kalinka does the same without starting the queue. Press play in the Qobuz app to take the output again.
+- **Tracks follow one another without a gap.** Shortly before a track ends, the plugin hands the output the one that follows in the Qobuz app's queue, so a live album or a DJ mix plays on as it does in the Qobuz app. Repeating one track or the whole queue works the same way.
 - **Quality follows both settings.** The stream is the lower of the Qobuz app's streaming quality and this plugin's *Format*. Changing the quality in the Qobuz app applies to the playing track at once, from where it was, and the Qobuz app shows the format that plays and the one the output runs at.
 - **Switching the output takes it along.** Choosing another output in Kalinka moves the Qobuz playback there, carrying on from where it had reached. The Qobuz app briefly shows it buffering.
 - **On Android, the Qobuz app has the media controls.** While the Qobuz app plays on Kalinka, Kalinka's own media notification steps aside, so the Qobuz app's notification and the volume keys control the playback.
@@ -106,7 +107,6 @@ The *User auth token* setting is gone. A token saved by an older version is igno
 - This is a prototype. The Qobuz Connect protocol is not documented by Qobuz and was learnt from other receivers.
 - User auth tokens have lasted months in practice. If Qobuz does not issue one, the plugin keeps the app's one-hour token and renews it every hour, which has not been proven over days.
 - The Qobuz Connect session token is renewed with the app's one-hour token, so once both have run out the player waits for the Qobuz app to hand them over again: choose the player in the app.
-- Tracks from the Qobuz app are not joined gaplessly yet.
 
 ## Building
 

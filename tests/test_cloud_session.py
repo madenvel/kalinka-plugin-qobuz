@@ -45,6 +45,9 @@ class FakePlayback:
     async def on_loop_mode(self, mode):
         self.calls.append(("loop", mode))
 
+    async def on_queue_changed(self):
+        self.calls.append(("queue_changed",))
+
     async def on_set_active(self, active):
         self.active = active
         self.calls.append(("set_active", active))
@@ -469,6 +472,7 @@ async def test_queue_changes_are_kept_and_a_reorder_refetched(harness):
     )
     assert [i.track_id for i in harness.queue.items] == [100]
     assert harness.sent == []
+    assert harness.playback.calls == [("queue_changed",)]
 
     await harness.hear(
         message_type=qc.SRVR_CTRL_QUEUE_TRACKS_REORDERED,

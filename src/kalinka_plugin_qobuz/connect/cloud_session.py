@@ -75,6 +75,10 @@ class Playback(Protocol):
 
     async def on_loop_mode(self, mode: int) -> None: ...
 
+    async def on_queue_changed(self) -> None:
+        """The Qobuz app's queue changed, and with it perhaps what plays next."""
+        ...
+
     async def on_set_active(self, active: bool) -> None: ...
 
     async def on_active_renderer(self, ours: bool) -> None:
@@ -258,8 +262,12 @@ class ConnectSession:
         elif kind == qc.SRVR_CTRL_QUEUE_ERROR_MESSAGE:
             error = message.srvr_ctrl_queue_error_message.error
             logger.warning("Qobuz Connect queue error: %s", error.code or "unknown")
-        elif self._queue.apply(message):
-            await self.ask_for_queue()
+        else:
+            before = list(self._queue.items)
+            if self._queue.apply(message):
+                await self.ask_for_queue()
+            if self._queue.items != before:
+                await playback.on_queue_changed()
 
     async def _on_session_state(self, body: qc.CtrlSessionStateMessage) -> None:
         session_uuid = frames.uuid_text(body.session_uuid)

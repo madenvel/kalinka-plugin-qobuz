@@ -24,8 +24,8 @@ classifiers = [
 ]
 
 dependencies = [
-    # 3.4: playing outside the play queue (Qobuz Connect).
-    "kalinka-plugin-sdk>=3.4,<4",
+    # 3.6: playing outside the play queue (Qobuz Connect), with the next track queued.
+    "kalinka-plugin-sdk>=3.6,<4",
     "httpx[http2]>=0.24",
     # Qobuz Connect pairing: the local handoff endpoint and its mDNS advert.
     "h11>=0.14",

@@ -24,7 +24,7 @@ from kalinka_plugin_sdk.direct_playback import (
 )
 from kalinka_plugin_sdk.inputmodule import DirectUrl, Track, TrackSource
 
-from kalinka_plugin_qobuz.connect.cloud_queue import CloudQueue
+from kalinka_plugin_qobuz.connect.cloud_queue import CloudQueue, QueueItem
 from kalinka_plugin_qobuz.connect import cloud_renderer
 from kalinka_plugin_qobuz.connect.cloud_renderer import VOLUME_ECHO_S, ConnectRenderer, _quality_level
 from kalinka_plugin_qobuz.connect.proto import qconnect_pb2 as qc
@@ -47,6 +47,9 @@ class FakeHold:
 
     async def play(self, source, track, *, start_offset_ms=0):
         self.calls.append(("play", source.source.url, start_offset_ms))
+
+    async def set_next(self, source, track=None):
+        self.calls.append(("next", source.source.url if source is not None else None))
 
     async def pause(self):
         self.calls.append(("pause",))
@@ -160,13 +163,17 @@ class FakeTracks:
         self.resolved.append((track_id, format_id))
         if self.error is not None:
             raise self.error
-        entity = EntityId(id=str(track_id), type=EntityType.TRACK, source="qobuz")
         return (
             TrackSource(
                 source=DirectUrl(url=f"https://streaming.qobuz.test/{track_id}"), format="audio/flac"
             ),
-            Track(id=entity, title=f"song {track_id}", duration=240, album=Album(id=entity, title="album")),
+            track_of(track_id),
         )
+
+
+def track_of(track_id):
+    entity = EntityId(id=str(track_id), type=EntityType.TRACK, source="qobuz")
+    return Track(id=entity, title=f"song {track_id}", duration=240, album=Album(id=entity, title="album"))
 
 
 class Clock:
@@ -195,6 +202,15 @@ class Harness:
 
     async def settle(self):
         await self.renderer.settled()
+
+    async def line_up(self):
+        """Let a line-up timer that is due fire, and its fetch land."""
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+            await self.settle()
+
+    def lined_up(self):
+        return [c[1] for c in self.direct.hold.calls if c[0] == "next"]
 
     async def activate(self):
         await self.renderer.on_set_active(True)
@@ -460,6 +476,153 @@ async def test_a_finished_track_moves_on_to_the_next(harness):
 
     assert harness.direct.hold.calls[-1] == ("play", "https://streaming.qobuz.test/222", 0)
     assert harness.last().current_queue_item_id == 2
+
+
+async def test_the_next_track_is_lined_up_shortly_before_the_end(harness):
+    await harness.cast(following=(2, 222))
+    hold = harness.direct.hold
+
+    hold.show(PlayerStateEnum.PLAYING, position=200000)
+    await harness.line_up()
+    assert harness.lined_up() == []
+
+    hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+
+    assert harness.lined_up() == ["https://streaming.qobuz.test/222"]
+    assert harness.tracks.resolved == [(111, 27), (222, 27)]
+
+
+async def test_a_lined_up_track_plays_on_without_being_played_again(harness):
+    await harness.cast(following=(2, 222))
+    hold = harness.direct.hold
+    hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+
+    hold.listener.on_next_started(track_of(222))
+    await harness.settle()
+
+    assert [c for c in hold.calls if c[0] == "play"] == [("play", "https://streaming.qobuz.test/111", 0)]
+    assert harness.renderer.now_playing.title == "song 222"
+    report = harness.last()
+    assert (report.playing_state, report.current_queue_item_id) == (PLAYING, 2)
+    assert report.current_position.value < 1000
+
+
+async def test_the_clouds_echo_of_the_track_that_plays_on_reloads_nothing(harness):
+    await harness.cast(following=(2, 222))
+    hold = harness.direct.hold
+    hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+    hold.listener.on_next_started(track_of(222))
+    await harness.settle()
+
+    await harness.set_state(state=PLAYING, current=(2, 222), following=(3, 333))
+
+    assert [c for c in hold.calls if c[0] == "play"] == [("play", "https://streaming.qobuz.test/111", 0)]
+
+
+async def test_a_new_next_track_replaces_the_one_lined_up(harness):
+    await harness.cast(following=(2, 222))
+    hold = harness.direct.hold
+    hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+
+    await harness.set_state(following=(3, 333))
+    await harness.line_up()
+
+    assert harness.lined_up() == [
+        "https://streaming.qobuz.test/222",
+        None,
+        "https://streaming.qobuz.test/333",
+    ]
+
+
+async def test_a_queue_change_lines_up_what_now_follows(harness):
+    harness.queue.items = [QueueItem(1, 111), QueueItem(2, 222)]
+    await harness.cast(following=None)
+    hold = harness.direct.hold
+    hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+
+    harness.queue.items.insert(1, QueueItem(5, 555))
+    await harness.renderer.on_queue_changed()
+    await harness.line_up()
+
+    assert harness.lined_up() == [
+        "https://streaming.qobuz.test/222",
+        None,
+        "https://streaming.qobuz.test/555",
+    ]
+
+
+async def test_nothing_is_lined_up_while_paused(harness):
+    await harness.cast(following=(2, 222))
+
+    harness.direct.hold.show(PlayerStateEnum.PAUSED, position=235000)
+    await harness.line_up()
+
+    assert harness.lined_up() == []
+
+
+async def test_looping_one_track_lines_it_up_again(harness):
+    await harness.cast(following=(2, 222))
+    await harness.renderer.on_loop_mode(cloud_renderer.LOOP_ONE)
+
+    harness.direct.hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+
+    assert harness.lined_up() == ["https://streaming.qobuz.test/111"]
+
+
+async def test_a_next_track_that_cannot_be_fetched_follows_after_a_gap(harness):
+    await harness.cast(following=(2, 222))
+    hold = harness.direct.hold
+    harness.tracks.error = RuntimeError("no stream")
+
+    hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+    assert harness.lined_up() == []
+
+    harness.tracks.error = None
+    hold.listener.on_finished()
+    await harness.settle()
+
+    assert ("play", "https://streaming.qobuz.test/222", 0) in hold.calls
+
+
+async def test_moving_on_to_a_track_no_longer_next_plays_the_one_that_is(harness):
+    await harness.cast(following=(2, 222))
+    hold = harness.direct.hold
+    hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+    # Back to the start: the next change of what follows fetches nothing yet.
+    hold.show(PlayerStateEnum.PLAYING, position=1000)
+    await harness.set_state(following=(3, 333))
+
+    hold.listener.on_next_started(track_of(222))
+    await harness.settle()
+
+    assert hold.calls[-1] == ("play", "https://streaming.qobuz.test/333", 0)
+    assert harness.last().current_queue_item_id == 3
+
+
+async def test_moving_on_heard_after_another_track_was_played_skips_nothing(harness):
+    await harness.cast(following=(2, 222))
+    hold = harness.direct.hold
+    hold.show(PlayerStateEnum.PLAYING, position=235000)
+    await harness.line_up()
+
+    # The renderer moved on just as the app named another track to play.
+    await harness.set_state(state=PLAYING, current=(3, 333), following=(4, 444))
+    hold.listener.on_next_started(track_of(222))
+    await harness.settle()
+
+    assert [c for c in hold.calls if c[0] == "play"] == [
+        ("play", "https://streaming.qobuz.test/111", 0),
+        ("play", "https://streaming.qobuz.test/333", 0),
+    ]
+    assert harness.last().current_queue_item_id == 3
 
 
 async def test_the_end_of_the_queue_gives_the_output_back(harness):
