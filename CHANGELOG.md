@@ -2,6 +2,14 @@
 
 Curated, user-facing notes per release. Add a `## <version>` section before tagging — the release workflow puts the matching section into the GitHub Release body.
 
+## 5.1.0
+
+### Added
+- **Qobuz Connect plays gapless.** Shortly before a track ends, the plugin lines up the next track from the Qobuz app's queue on the output, so a live album or a DJ mix plays on without a pause between tracks. Repeating one track or the whole queue joins up the same way. If the queue changes or the next track changes in the Qobuz app, the plugin lines up the new one. If the next track cannot be fetched in time, it still plays after a short gap, as before.
+
+### Changed
+- Needs Kalinka server 5.5 or newer, which brings plugin SDK 3.6. The package will not install on an older server.
+
 ## 5.0.1
 
 ### Fixed

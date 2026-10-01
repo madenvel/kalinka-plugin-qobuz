@@ -4,7 +4,8 @@ The cloud names a track and a state; this takes the server's output through
 DirectPlayback and plays it, and reports back what is really playing so the
 app follows. Controls pressed in Kalinka arrive as transport requests and are
 applied here too, so both apps agree. When the server takes the output back,
-the app is told playback stopped.
+the app is told playback stopped. The track that follows is lined up on the
+renderer shortly before the current one ends, so it plays on without a gap.
 
 Echo handling follows Pibuz: the cloud repeats every state report as a
 SET_STATE naming no change, and right after a handoff replays a pause or stop
@@ -57,6 +58,9 @@ LOAD_ECHO_POSITION_MS = 1000
 DEACTIVATE_GRACE_S = 5.0
 SEEK_TOLERANCE_MS = 2000
 RESTART_PREV_AFTER_MS = 3000
+# The next track is lined up on the renderer this long before the current one
+# ends, and no sooner: Qobuz stream addresses expire.
+LINE_UP_BEFORE_END_MS = 10_000
 # The output echoes a volume we set; an echo this late is still ours, and
 # passing it on would pull the app's slider back while it is being dragged.
 VOLUME_ECHO_S = 1.0
@@ -108,6 +112,9 @@ class _HoldListener:
 
     def on_finished(self) -> None:
         self._renderer._from_hold(self._generation, self._renderer._finished)
+
+    def on_next_started(self, track: Track) -> None:
+        self._renderer._from_hold(self._generation, self._renderer._next_started, track)
 
     def on_command(self, request: TransportRequest) -> None:
         self._renderer._from_hold(self._generation, self._renderer._command, request)
@@ -171,6 +178,16 @@ class ConnectRenderer:
         self._muted_from: Optional[int] = None
         # The track whose stream was fetched again after failing; once each.
         self._refetched: Optional[QueueItem] = None
+        # The track lined up on the renderer to follow, with the level it was
+        # fetched at; the one whose stream is being fetched; and the timer that
+        # starts that fetch.
+        self._lined_up: Optional[tuple[QueueItem, int]] = None
+        # Tracks taken back off the renderer since it last played anything:
+        # one it may still have moved on to before it heard.
+        self._taken_back: set[int] = set()
+        self._fetching: Optional[tuple[QueueItem, int]] = None
+        self._next_fetch: Optional[asyncio.Task] = None
+        self._line_up_timer: Optional[asyncio.TimerHandle] = None
         # Where playback stands while the output reports nothing: the offset a
         # load started at, or where it was when the output went.
         self._settled_position = 0
@@ -227,7 +244,10 @@ class ConnectRenderer:
         self._submit(self._mute, muted)
 
     async def on_loop_mode(self, mode: int) -> None:
-        self._loop_mode = mode
+        self._submit(self._set_loop_mode, mode)
+
+    async def on_queue_changed(self) -> None:
+        self._submit(self._line_up_next)
 
     async def on_shown_volume(self, percent: int) -> None:
         self._submit(self._shown_volume_changed, percent)
@@ -304,6 +324,10 @@ class ConnectRenderer:
             await self._deactivate()
 
     async def _set_state(self, message: qc.RendererSetStateMessage) -> None:
+        await self._apply_state(message)
+        await self._line_up_next()
+
+    async def _apply_state(self, message: qc.RendererSetStateMessage) -> None:
         if message.HasField("queue_version"):
             self._queue_version = (message.queue_version.major, message.queue_version.minor)
         if message.HasField("next_track"):
@@ -361,6 +385,13 @@ class ConnectRenderer:
             logger.info("Qobuz Connect: switching to quality level %d", self._level)
             state = PLAYING_PAUSED if self._intent == PLAYING_PAUSED else PLAYING_PLAYING
             await self._load(self._current, self._position(), state)
+        else:
+            # The track lined up to follow may have been fetched at another level.
+            await self._line_up_next()
+
+    async def _set_loop_mode(self, mode: int) -> None:
+        self._loop_mode = mode
+        await self._line_up_next()
 
     async def _mute(self, muted: bool) -> None:
         if muted and self._muted_from is None:
@@ -393,6 +424,7 @@ class ConnectRenderer:
             self._intent = PLAYING_PLAYING
         await self._report()
         await self._report_quality()
+        await self._line_up_next()
 
     async def _output_volume(self, volume: DeviceVolume) -> None:
         """The output's volume, from Kalinka, the host, or our own echo."""
@@ -449,18 +481,39 @@ class ConnectRenderer:
         return self._muted_from if self._muted_from is not None else self._volume
 
     async def _finished(self) -> None:
-        if self._loop_mode == LOOP_ONE and self._current is not None:
-            following = self._current
-        else:
-            following = self._following()
-            if following is None and self._loop_mode == LOOP_ALL:
-                following = self._queue.first()
+        following = self._upcoming()
         if following is None:
             self._intent = PLAYING_STOPPED
             await self._report()
             await self._release()
             return
         await self._load(following, 0, PLAYING_PLAYING)
+
+    async def _next_started(self, track: Track) -> None:
+        """The renderer moved on to the track lined up: it plays already."""
+        lined_up = self._lined_up
+        if lined_up is None or track.id.id != str(lined_up[0].track_id):
+            if track.id.id not in {str(taken) for taken in self._taken_back}:
+                # Late news from before something else was played: that plays now.
+                logger.info("Qobuz Connect: ignored the move on to a track since replaced")
+                return
+            # One taken back as the renderer moved on to it: play what follows now.
+            logger.info("Qobuz Connect: the renderer moved on to a track no longer next")
+            self._lined_up = None
+            await self._finished()
+            return
+        self._lined_up = None
+        self._taken_back.clear()
+        item, level = lined_up
+        logger.info("Qobuz Connect: track %s follows without a gap", item.track_id)
+        self._current = item
+        self._track = track
+        self._loaded_level = level
+        self._intent = PLAYING_PLAYING
+        self._state = None
+        self._settled_position = 0
+        await self._report()
+        await self._line_up_next()
 
     async def _command(self, request: TransportRequest) -> None:
         if request.kind is TransportKind.PAUSE:
@@ -479,9 +532,11 @@ class ConnectRenderer:
                 await self._seek(0)
             else:
                 await self._load(earlier, 0, PLAYING_PLAYING)
+        await self._line_up_next()
 
     async def _revoked(self, reason: RevokeReason) -> None:
         self._hold = None
+        self._drop_next()
         self._settle_position()
         self._stop_ticker()
         self._intent = PLAYING_STOPPED
@@ -493,6 +548,8 @@ class ConnectRenderer:
     async def _load(self, item: QueueItem, position_ms: int, state: int) -> None:
         self._current = item
         self._loaded_at = self._clock()
+        # Playing anything takes the renderer's successor away.
+        self._drop_next()
         if state == PLAYING_STOPPED:
             self._intent = PLAYING_STOPPED
             await self._release()
@@ -528,6 +585,7 @@ class ConnectRenderer:
         self._settled_position = position_ms
         await self._report(buffering=state == PLAYING_PLAYING)
         self._start_ticker()
+        await self._line_up_next()
 
     async def _resume(self, position: Optional[int]) -> None:
         hold = self._hold
@@ -582,6 +640,7 @@ class ConnectRenderer:
 
     async def _release(self) -> None:
         hold, self._hold = self._hold, None
+        self._drop_next()
         if hold is not None:
             # What it said before letting go is late news now.
             self._generation += 1
@@ -608,11 +667,128 @@ class ConnectRenderer:
             return self._volume
         return _percent(await hold.get_volume())
 
+    def _upcoming(self) -> Optional[QueueItem]:
+        """What plays when the current track ends, as the loop mode has it."""
+        if self._loop_mode == LOOP_ONE and self._current is not None:
+            return self._current
+        following = self._following()
+        if following is None and self._loop_mode == LOOP_ALL:
+            return self._queue.first()
+        return following
+
     def _following(self) -> Optional[QueueItem]:
         # The cloud's own idea of what follows wins over the queue we mirror.
         if self._next is not None and self._next != self._current:
             return self._next
         return self._queue.after(self._current)
+
+    # ------------------------------------------------------------------
+    # The track that follows, lined up on the renderer
+
+    def _next_target(self) -> Optional[tuple[QueueItem, int]]:
+        """The track to line up after the current one, and the level to fetch it at."""
+        hold = self._hold
+        if hold is None or not hold.active or self._current is None:
+            return None
+        following = self._upcoming()
+        return (following, self._level) if following is not None else None
+
+    async def _line_up_next(self) -> None:
+        """Keep the track that follows lined up on the renderer, so it plays on without a gap.
+
+        Its stream is fetched only shortly before the current track ends, as
+        the server's own queue does it. Anything that moves that moment or
+        changes what follows calls this again; a track that ends with nothing
+        lined up still moves on, through on_finished, after a gap.
+        """
+        target = self._next_target()
+        if self._fetching is not None and self._fetching != target:
+            self._cancel_next_fetch()
+        if self._lined_up is not None and self._lined_up != target:
+            # What follows changed after it was lined up.
+            self._taken_back.add(self._lined_up[0].track_id)
+            self._lined_up = None
+            hold = self._hold
+            if hold is not None and hold.active:
+                try:
+                    await hold.set_next(None)
+                except HoldEnded:
+                    pass
+        self._cancel_line_up_timer()
+        if target is None or target in (self._lined_up, self._fetching):
+            return
+        duration = self._duration()
+        if self._intent != PLAYING_PLAYING or not duration:
+            return
+        delay_ms = max(0, duration - self._position() - LINE_UP_BEFORE_END_MS)
+        self._line_up_timer = asyncio.get_running_loop().call_later(
+            delay_ms / 1000, self._submit, self._fetch_next, target
+        )
+
+    async def _fetch_next(self, target: tuple[QueueItem, int]) -> None:
+        self._line_up_timer = None
+        if self._fetching is not None or target == self._lined_up:
+            return
+        if target != self._next_target():
+            return
+        self._fetching = target
+        self._next_fetch = asyncio.create_task(
+            self._resolve_next(target), name="qobuz-connect-next"
+        )
+
+    async def _resolve_next(self, target: tuple[QueueItem, int]) -> None:
+        """Off the lane: a slow network holds up no control meanwhile."""
+        item, level = target
+        try:
+            source, track = await self._tracks.resolve(item.track_id, FORMAT_FOR_LEVEL[level])
+        except Exception as exc:
+            logger.warning(
+                "Qobuz Connect could not fetch the next track %s (%s)",
+                item.track_id,
+                type(exc).__name__,
+            )
+            source = track = None
+        self._submit(self._next_fetched, target, source, track)
+
+    async def _next_fetched(
+        self,
+        target: tuple[QueueItem, int],
+        source: Optional[TrackSource],
+        track: Optional[Track],
+    ) -> None:
+        if target != self._fetching:
+            return  # given up on while it was fetched
+        self._fetching = self._next_fetch = None
+        hold = self._hold
+        if source is None or hold is None or not hold.active or target != self._next_target():
+            return
+        try:
+            await hold.set_next(source, track)
+        except (HoldEnded, ValueError) as exc:
+            logger.info("Qobuz Connect: the next track was not lined up: %s", exc)
+            return
+        self._lined_up = target
+        logger.info("Qobuz Connect: track %s lined up to follow", target[0].track_id)
+
+    def _drop_next(self) -> None:
+        """Forget the track that follows; the server drops it with what played."""
+        self._lined_up = None
+        self._taken_back.clear()
+        self._cancel_next_fetch()
+        self._cancel_line_up_timer()
+
+    def _cancel_next_fetch(self) -> None:
+        fetch, self._next_fetch = self._next_fetch, None
+        self._fetching = None
+        if fetch is not None:
+            fetch.cancel()
+
+    def _cancel_line_up_timer(self) -> None:
+        timer, self._line_up_timer = self._line_up_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    # ------------------------------------------------------------------
 
     def _handoff_echo(self, position: Optional[int]) -> bool:
         return (
